@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Tomi's Shoebox</title>
+<meta name="description" content="Snap receipts, file them by category in Google Drive, and keep a running ledger.">
+<meta name="theme-color" content="#f9cadb">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Shoebox">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icons/favicon.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Figtree:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <button type="button" class="chip" id="accountChip"><span class="dot err" id="acctDot"></span><span id="acctText">Not connected</span></button>
+    <button type="button" class="iconbtn" id="settingsBtn" aria-label="Settings">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+  </div>
+
+  <header class="label">
+    <div class="label-top"><span>Receipts · Calgary</span><span id="lblDate"></span></div>
+    <h1><span class="pre">Tomi's</span>Shoebox</h1>
+    <dl class="spec">
+      <div><dt>In the box</dt><dd class="num" id="lblCount">0</dd></div>
+      <div><dt>This month</dt><dd class="num" id="lblMonth">0</dd></div>
+      <div><dt>Since</dt><dd class="num" id="lblSince">New</dd></div>
+    </dl>
+    <div class="barcode" aria-hidden="true"></div>
+  </header>
+
+  <!-- first-run setup -->
+  <section class="card" id="setupCard" hidden>
+    <h3>Connect your Google Drive</h3>
+    <p>Your receipts are saved in your own Google Drive. To allow that, this app needs a free Google "Client ID". You only set this up once.</p>
+    <details class="guide" id="guide">
+      <summary>How to get your Client ID (about 10 minutes)</summary>
+      <ol class="steps">
+        <li>On your laptop, go to <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener">console.cloud.google.com</a> and sign in with <span class="mono">oyendetomi@gmail.com</span>. Create a project called <span class="mono">Tomi's Shoebox</span>.</li>
+        <li>Open <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener">Google Drive API</a> and click <b>Enable</b>.</li>
+        <li>Open <a href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noopener">Google Auth Platform</a> and click <b>Get started</b>. App name: <span class="mono">Tomi's Shoebox</span>. Audience: <b>External</b>. Use your email for the contact fields, then finish.</li>
+        <li>Go to <b>Audience</b>, then under <b>Test users</b> add <span class="mono">oyendetomi@gmail.com</span>.</li>
+        <li>Go to <b>Clients</b>, then <b>Create client</b>. Type: <b>Web application</b>. Under <b>Authorized JavaScript origins</b> add <span class="mono" id="originHint">this app's address</span>. Under <b>Authorized redirect URIs</b> add the same address followed by <span class="mono">/</span>. Click <b>Create</b>.</li>
+        <li>Copy the <b>Client ID</b> (it ends in <span class="mono">.apps.googleusercontent.com</span>) and paste it below.</li>
+      </ol>
+    </details>
+    <div class="field"><label for="clientIdInput">Google Client ID</label><input id="clientIdInput" autocomplete="off" spellcheck="false" placeholder="1234567890-abc123.apps.googleusercontent.com"></div>
+    <div class="actions"><button type="button" class="primary" id="saveClientBtn">Save and connect</button></div>
+    <p class="small">When Google says it hasn't verified this app, that's expected: it's your own private app. Tap <b>Continue</b>.</p>
+  </section>
+
+  <div class="install" id="installBar" hidden>
+    <span id="installText">Install Shoebox so it opens like a normal app.</span>
+    <span style="display:flex;gap:8px"><button type="button" class="primary" id="installBtn" hidden>Install</button><button type="button" class="ghost" id="installDismiss">Not now</button></span>
+  </div>
+
+  <section class="summary" aria-label="This month">
+    <div class="tile"><h2 id="mLabel">This month</h2><div class="big num" id="mTotal">$0.00</div><small id="mCount">No receipts yet</small></div>
+    <div class="tile"><h2>Business this year</h2><div class="big num" id="bizTotal">$0.00</div><small id="bizCount">Tagged as business</small></div>
+    <div class="bars" id="bars" hidden></div>
+  </section>
+
+  <section class="capture" aria-label="Add a receipt">
+    <label class="snap" for="camInput">
+      <span class="lens"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></span>
+      Snap a receipt
+    </label>
+    <input class="sr" id="camInput" type="file" accept="image/*" capture="environment">
+    <div class="capture-row">
+      <label class="btn" for="libInput">Choose a photo</label>
+      <input class="sr" id="libInput" type="file" accept="image/*">
+      <button type="button" id="manualBtn">Add without a photo</button>
+    </div>
+    <p class="note">Shoebox reads the receipt on your device, then fills in the store, date, total, tax and category. You check it before saving.</p>
+  </section>
+
+  <section class="files" aria-label="Your files in Google Drive">
+    <h2>Filed in your Google Drive</h2>
+    <div class="files-row">
+      <a class="btn" id="folderLink" href="#" target="_blank" rel="noopener" hidden>Receipt photos by category</a>
+      <a class="btn primary" id="ledgerLink" href="#" target="_blank" rel="noopener" hidden>Open ledger</a>
+      <button type="button" id="exportBtn" hidden>Download CSV</button>
+    </div>
+    <p>The ledger is a Google Sheet with every purchase, its cost and tax, a grand total, and totals by category and by personal or business. It updates every time you save.</p>
+    <div class="sync"><span class="dot" id="syncDot"></span><span id="syncMsg">Not connected yet.</span><button type="button" class="ghost" id="syncBtn" hidden>Sync now</button></div>
+  </section>
+
+  <section class="sec" aria-label="Recent receipts">
+    <div class="sec-head"><h2>Recent</h2><span class="note" id="recentNote" style="text-align:right"></span></div>
+    <div id="list"><div class="empty"><strong>Nothing in the box yet</strong>Only your last five receipts show here. Everything else lives in your Drive folder and ledger.</div></div>
+  </section>
+</div>
+
+<!-- review / edit -->
+<div class="sheet" id="editSheet" hidden>
+  <div class="panel" role="dialog" aria-modal="true" aria-labelledby="editTitle">
+    <div class="panel-head"><h3 id="editTitle">Check this receipt</h3><button class="ghost" type="button" id="editClose">Cancel</button></div>
+    <img class="preview" id="editPreview" alt="Receipt photo" hidden>
+    <div class="status" id="readStatus" hidden>
+      <span class="spin" id="readSpin"></span><span class="grow" id="readMsg">Reading your receipt…</span>
+      <span class="progress" id="readBarWrap"><i id="readBar"></i></span>
+    </div>
+    <details id="ocrDetails" hidden><summary class="small">Show the text it read</summary><pre class="ocrtext" id="ocrText"></pre></details>
+    <form class="form" id="editForm" novalidate>
+      <div class="field full"><label for="fItem">What you bought</label><input id="fItem" placeholder="e.g. Printer ink, groceries, Uber to airport" autocomplete="off"></div>
+      <div class="field full"><label for="fMerchant">Store or vendor</label><input id="fMerchant" required autocomplete="off"></div>
+      <div class="field"><label for="fDate">Date</label><input id="fDate" type="date" required></div>
+      <div class="field"><label for="fCategory">Category</label><select id="fCategory"></select></div>
+      <div class="field"><label for="fTotal">Cost (total paid)</label><input id="fTotal" inputmode="decimal" class="num" required placeholder="0.00"></div>
+      <div class="field"><label for="fTax">GST/HST/tax</label><input id="fTax" inputmode="decimal" class="num" placeholder="0.00"></div>
+      <div class="field"><label for="fCurrency">Currency</label><select id="fCurrency"><option>CAD</option><option>USD</option><option>EUR</option><option>GBP</option><option>NGN</option><option>MXN</option></select></div>
+      <div class="field"><span class="lbl" id="kindLbl">Type</span><div class="seg" id="fKind" role="group" aria-labelledby="kindLbl"><button type="button" data-v="personal" aria-pressed="true">Personal</button><button type="button" data-v="business" aria-pressed="false">Business</button></div></div>
+      <div class="actions full"><button type="submit" class="primary" id="saveBtn">Save receipt</button></div>
+    </form>
+  </div>
+</div>
+
+<!-- detail -->
+<div class="sheet" id="detailSheet" hidden>
+  <div class="panel" role="dialog" aria-modal="true" aria-labelledby="dTitle">
+    <div class="panel-head"><h3 id="dTitle">Receipt</h3><button class="ghost" type="button" id="detailClose">Close</button></div>
+    <div class="slip" id="slip"></div>
+    <div class="confirm" id="delConfirm" hidden>Delete this receipt? Its photo moves to your Drive trash and it's removed from the ledger.
+      <div class="actions"><button type="button" id="delNo">Keep it</button><button type="button" class="danger" id="delYes">Delete</button></div></div>
+    <div class="actions"><button type="button" class="danger" id="delBtn">Delete</button><button type="button" class="primary" id="editBtn">Edit</button></div>
+  </div>
+</div>
+
+<!-- settings -->
+<div class="sheet" id="settingsSheet" hidden>
+  <div class="panel" role="dialog" aria-modal="true" aria-labelledby="sTitle">
+    <div class="panel-head"><h3 id="sTitle">Settings</h3><button class="ghost" type="button" id="settingsClose">Close</button></div>
+    <div class="card">
+      <h2>Set up another device</h2>
+      <p class="small">Open this link on your phone or laptop and it's ready to connect, with no need to paste the Client ID again.</p>
+      <input id="setupLink" readonly class="mono" aria-label="Setup link">
+      <div class="actions"><button type="button" id="copyLinkBtn">Copy link</button></div>
+    </div>
+    <div class="card">
+      <h2>Google Client ID</h2>
+      <input id="clientIdEdit" autocomplete="off" spellcheck="false" aria-label="Google Client ID">
+      <div class="actions"><button type="button" id="clientIdSave">Save</button></div>
+    </div>
+    <div class="card">
+      <h2>Google Drive</h2>
+      <p class="small" id="driveInfo">Not connected.</p>
+      <div class="actions"><button type="button" class="danger" id="disconnectBtn">Disconnect this device</button></div>
+      <p class="small">Disconnecting only signs this device out. Your receipts stay in Google Drive.</p>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" hidden></div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js" defer></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="parse.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
