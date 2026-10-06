@@ -111,7 +111,11 @@
     </div>
     <details id="ocrDetails" hidden><summary class="small">Show the text it read</summary><pre class="ocrtext" id="ocrText"></pre></details>
     <form class="form" id="editForm" novalidate>
-      <div class="field full"><label for="fItem">What you bought</label><input id="fItem" placeholder="e.g. Printer ink, groceries, Uber to airport" autocomplete="off"></div>
+      <div class="field full"><label for="fItem">Short description</label><input id="fItem" placeholder="e.g. Weekly groceries, printer ink" autocomplete="off"></div>
+      <div class="field full"><span class="lbl">Items on the receipt</span>
+        <div class="items" id="itemsList"></div>
+        <div class="items-foot"><button type="button" class="chip" id="addItemBtn">+ Add item</button><span class="small" id="itemsCheck"></span></div>
+      </div>
       <div class="field full"><label for="fMerchant">Store or vendor</label><input id="fMerchant" required autocomplete="off"></div>
       <div class="field"><label for="fDate">Date</label><input id="fDate" type="date" required></div>
       <div class="field"><label for="fCategory">Category</label><select id="fCategory"></select></div>

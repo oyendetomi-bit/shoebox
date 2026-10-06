@@ -159,23 +159,40 @@ async function ensureFolder(cat) {
 }
 
 // ---------- ledger ----------
-function ledgerCSV(rows) {
+// One row per item. Tax gets its own row, and any gap between the items and the total
+// becomes an "other charges" or "discounts" row, so every receipt adds up to what you paid.
+function lineRows(r) {
+  const total = r.total ?? 0, tax = r.tax ?? 0;
+  const items = (r.items || []).filter(i => i && i.name && i.price != null && isFinite(i.price));
+  const rows = items.length ? items.map(i => ({ item: i.name, price: i.price, tax: null }))
+                            : [{ item: r.item || "Purchase", price: Math.round((total - tax) * 100) / 100, tax: null }];
+  const diff = Math.round((total - tax - rows.reduce((a, x) => a + x.price, 0)) * 100) / 100;
+  if (items.length && Math.abs(diff) >= 0.01) rows.push({ item: diff > 0 ? "Other charges (not itemized)" : "Discounts / adjustments", price: diff, tax: null });
+  if (tax) rows.push({ item: "Tax (GST/HST)", price: null, tax });
+  return rows;
+}
+function ledgerCSV(receiptsSorted) {
   const q = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
-  const out = [["Date", "Purchase", "Store", "Category", "Type", "Cost", "Tax", "Currency", "Photo"]];
-  rows.forEach(r => out.push([r.date, r.item || "", r.merchant, r.category, r.kind === "business" ? "Business" : "Personal",
-    (r.total ?? 0).toFixed(2), r.tax != null ? r.tax.toFixed(2) : "", r.currency,
-    r.photoUrl ? `=HYPERLINK("${r.photoUrl}","View photo")` : ""]));
-  const n = Math.max(rows.length + 1, 2), F = `$F$2:$F$${n}`, G = `$G$2:$G$${n}`;
-  const mixed = new Set(rows.map(r => r.currency)).size > 1;
+  const out = [["Date", "Item", "Store", "Category", "Type", "Price", "Tax", "Currency", "Receipt total", "Receipt #", "Photo"]];
+  receiptsSorted.forEach((r, ri) => {
+    lineRows(r).forEach((x, i) => out.push([r.date, x.item, r.merchant, r.category, r.kind === "business" ? "Business" : "Personal",
+      x.price != null ? x.price.toFixed(2) : "", x.tax != null ? x.tax.toFixed(2) : "", r.currency,
+      i === 0 ? (r.total ?? 0).toFixed(2) : "", `#${ri + 1}`,
+      i === 0 && r.photoUrl ? `=HYPERLINK("${r.photoUrl}","View photo")` : ""]));
+  });
+  const n = Math.max(out.length, 2), F = `$F$2:$F$${n}`, G = `$G$2:$G$${n}`, D = `$D$2:$D$${n}`, E = `$E$2:$E$${n}`, J = `$J$2:$J$${n}`;
+  const mixed = new Set(receiptsSorted.map(r => r.currency)).size > 1;
   out.push([]);
-  out.push([mixed ? "TOTAL (all currencies)" : "TOTAL", "", "", "", "", `=SUM(${F})`, `=SUM(${G})`, "", ""]);
+  out.push(["ITEMS SUBTOTAL", "", "", "", "", `=SUM(${F})`, "", "", "", "", ""]);
+  out.push(["TAX", "", "", "", "", "", `=SUM(${G})`, "", "", "", ""]);
+  out.push([mixed ? "TOTAL SPENT (all currencies)" : "TOTAL SPENT", "", "", "", "", `=SUM(${F})+SUM(${G})`, "", "", "", `=COUNTUNIQUE(${J})&" receipts"`, ""]);
   out.push([]);
-  out.push(["BY CATEGORY", "", "", "", "", "Cost", "Tax", "Receipts", ""]);
-  CATEGORIES.filter(c => rows.some(r => r.category === c)).forEach(c =>
-    out.push([c, "", "", "", "", `=SUMIF($D$2:$D$${n},"${c}",${F})`, `=SUMIF($D$2:$D$${n},"${c}",${G})`, `=COUNTIF($D$2:$D$${n},"${c}")`, ""]));
+  out.push(["BY CATEGORY", "", "", "", "", "Items", "Tax", "", "Total", "Receipts", ""]);
+  CATEGORIES.filter(c => receiptsSorted.some(r => r.category === c)).forEach(c =>
+    out.push([c, "", "", "", "", `=SUMIF(${D},"${c}",${F})`, `=SUMIF(${D},"${c}",${G})`, "", `=SUMIF(${D},"${c}",${F})+SUMIF(${D},"${c}",${G})`, `=COUNTUNIQUEIFS(${J},${D},"${c}")`, ""]));
   out.push([]);
-  out.push(["BY TYPE", "", "", "", "", "Cost", "Tax", "Receipts", ""]);
-  ["Personal", "Business"].forEach(k => out.push([k, "", "", "", "", `=SUMIF($E$2:$E$${n},"${k}",${F})`, `=SUMIF($E$2:$E$${n},"${k}",${G})`, `=COUNTIF($E$2:$E$${n},"${k}")`, ""]));
+  out.push(["BY TYPE", "", "", "", "", "Items", "Tax", "", "Total", "Receipts", ""]);
+  ["Personal", "Business"].forEach(k => out.push([k, "", "", "", "", `=SUMIF(${E},"${k}",${F})`, `=SUMIF(${E},"${k}",${G})`, "", `=SUMIF(${E},"${k}",${F})+SUMIF(${E},"${k}",${G})`, `=COUNTUNIQUEIFS(${J},${E},"${k}")`, ""]));
   return out.map(r => r.map(q).join(",")).join("\n");
 }
 async function writeLedger() {
@@ -361,7 +378,7 @@ function render() {
   const recent = all.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, RECENT);
   $("#recentNote").textContent = all.length > RECENT ? `${all.length - RECENT} more in your ledger` : "";
   $("#list").innerHTML = recent.length ? `<ul class="list">${recent.map(r => `<li><button class="row" type="button" data-id="${esc(r.id)}">
-      <span class="tab ${r.kind === "business" ? "biz" : ""}"></span><span style="min-width:0"><div class="who">${esc(r.item || r.merchant || "Receipt")}</div>
+      <span class="tab ${r.kind === "business" ? "biz" : ""}"></span><span style="min-width:0"><div class="who">${esc(r.item || (r.items?.length ? r.items[0].name + (r.items.length > 1 ? ` + ${r.items.length - 1} more` : "") : "") || r.merchant || "Receipt")}</div>
         <div class="meta"><span class="num">${esc(r.date || "")}</span><span>${esc(r.item ? r.merchant : "")}</span><span class="pill ${r.kind === "business" ? "biz" : ""}">${esc(r.category)}</span>${r.needsCheck ? `<span class="pill warn">Check</span>` : ""}${r.hadPhoto && !r.photoId ? `<span class="pill warn">Not in Drive yet</span>` : ""}</div></span>
       <span class="amt">${money(r.total, r.currency)}</span></button></li>`).join("")}</ul>`
     : `<div class="empty"><strong>Nothing in the box yet</strong>Only your last five receipts show here. Everything else lives in your Drive folder and ledger.</div>`;
@@ -402,11 +419,40 @@ function learnedMap() {
 const form = { kind: "personal", editing: null, photo: null, lowConf: false, ocrText: "" };
 function setKind(v) { form.kind = v; document.querySelectorAll("#fKind button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.v === v))); }
 document.querySelectorAll("#fKind button").forEach(b => b.addEventListener("click", () => setKind(b.dataset.v)));
+function itemRow(it = {}) {
+  const d = document.createElement("div"); d.className = "irow";
+  d.innerHTML = `<input class="iname" placeholder="Item" autocomplete="off" aria-label="Item name"><input class="iprice num" inputmode="decimal" placeholder="0.00" aria-label="Item price"><button type="button" class="iremove ghost" aria-label="Remove item">×</button>`;
+  d.querySelector(".iname").value = it.name || "";
+  d.querySelector(".iprice").value = it.price != null ? Number(it.price).toFixed(2) : "";
+  $("#itemsList").appendChild(d);
+  return d;
+}
+function setItems(items) { $("#itemsList").innerHTML = ""; (items || []).forEach(itemRow); checkItems(); }
+function readItems() {
+  return [...document.querySelectorAll("#itemsList .irow")].map(d => ({ name: d.querySelector(".iname").value.trim(), price: parseAmt(d.querySelector(".iprice").value) }))
+    .filter(i => i.name && i.price != null);
+}
+function checkItems() {
+  const items = readItems(), el = $("#itemsCheck");
+  if (!items.length) { el.textContent = "No items: the ledger shows one line for this receipt."; el.classList.remove("off"); return; }
+  const total = parseAmt($("#fTotal").value), tax = parseAmt($("#fTax").value) || 0, cur = $("#fCurrency").value;
+  const sum = Math.round((items.reduce((a, i) => a + i.price, 0) + tax) * 100) / 100;
+  if (total == null) { el.textContent = `Items + tax = ${money(sum, cur)}`; el.classList.remove("off"); return; }
+  const diff = Math.round((total - sum) * 100) / 100;
+  el.textContent = Math.abs(diff) < 0.01 ? `Items + tax = ${money(sum, cur)} ✓ matches the total` : `Items + tax = ${money(sum, cur)}. The ${money(Math.abs(diff), cur)} difference is listed as ${diff > 0 ? "other charges" : "a discount"}.`;
+  el.classList.toggle("off", Math.abs(diff) >= 0.01);
+}
+$("#addItemBtn").addEventListener("click", () => { itemRow().querySelector(".iname").focus(); checkItems(); });
+$("#itemsList").addEventListener("click", e => { const b = e.target.closest(".iremove"); if (b) { b.closest(".irow").remove(); checkItems(); } });
+$("#itemsList").addEventListener("input", checkItems);
+["#fTotal", "#fTax", "#fCurrency"].forEach(id => $(id).addEventListener("input", checkItems));
 function fillForm(r) {
+  setItems(r.items || []);
   $("#fItem").value = r.item || ""; $("#fMerchant").value = r.merchant || ""; $("#fDate").value = r.date || todayISO();
   $("#fCategory").value = CATEGORIES.includes(r.category) ? r.category : "Other";
   $("#fTotal").value = r.total != null ? Number(r.total).toFixed(2) : ""; $("#fTax").value = r.tax != null ? Number(r.tax).toFixed(2) : "";
   $("#fCurrency").value = r.currency || "CAD"; setKind(r.kind || "personal");
+  checkItems();
 }
 function readMsg(text, spinning, pct) {
   $("#readStatus").hidden = false; $("#readSpin").hidden = !spinning; $("#readMsg").textContent = text;
@@ -446,7 +492,7 @@ async function onPhoto(file) {
     fillForm({ ...r, currency: "CAD" });
     form.lowConf = !r.confident; form.ocrText = data.text;
     $("#ocrText").textContent = data.text.trim() || "(no text found)"; $("#ocrDetails").hidden = false;
-    readMsg(r.total == null ? "Couldn't find the total. Please fill in the details." : r.confident ? "Done. Check the details and save." : "Some parts were hard to read. Please double-check the store, date and total.", false, null);
+    readMsg(r.total == null ? "Couldn't find the total. Please fill in the details." : r.confident ? (r.items.length ? `Done. Found ${r.items.length} item${r.items.length > 1 ? "s" : ""}. Check them and save.` : "Done. No item lines found; add them below if you like.") : "Some parts were hard to read. Please double-check the store, date and total.", false, null);
   } catch {
     readMsg(navigator.onLine ? "Couldn't read this one. Fill in the details below." : "The reader needs internet the first time. Fill in the details, or try again online.", false, null);
   } finally { if (form.photo === mine) $("#saveBtn").disabled = false; progressCb = null; }
@@ -465,7 +511,7 @@ $("#editForm").addEventListener("submit", async e => {
   const prev = form.editing, photo = form.photo, now = Date.now();
   const r = {
     ...(prev || {}), id: prev?.id || uid(),
-    item: $("#fItem").value.trim(), merchant, date: $("#fDate").value || todayISO(), total, tax: parseAmt($("#fTax").value),
+    item: $("#fItem").value.trim(), items: readItems(), merchant, date: $("#fDate").value || todayISO(), total, tax: parseAmt($("#fTax").value),
     currency: $("#fCurrency").value, category: $("#fCategory").value, kind: form.kind,
     hadPhoto: !!(photo || prev?.hadPhoto), createdAt: prev?.createdAt || now, updatedAt: now,
     needsCheck: prev ? false : form.lowConf,
@@ -486,7 +532,8 @@ function openDetail(id) {
   const r = live().find(x => x.id === id); if (!r) return;
   detailId = id; $("#delConfirm").hidden = true; $("#delBtn").hidden = false;
   $("#dTitle").textContent = r.item || r.merchant || "Receipt";
-  $("#slip").innerHTML = `<dl>${r.item ? `<dt>Purchase</dt><dd>${esc(r.item)}</dd>` : ""}<dt>Store</dt><dd>${esc(r.merchant)}</dd><dt>Date</dt><dd>${esc(r.date)}</dd><dt>Category</dt><dd>${esc(r.category)}</dd>
+  const its = (r.items || []);
+  $("#slip").innerHTML = (its.length ? `<div class="itemlist">${its.map(i => `<span>${esc(i.name)}</span><span>${money(i.price, r.currency)}</span>`).join("")}</div>` : "") + `<dl>${r.item ? `<dt>Purchase</dt><dd>${esc(r.item)}</dd>` : ""}<dt>Store</dt><dd>${esc(r.merchant)}</dd><dt>Date</dt><dd>${esc(r.date)}</dd><dt>Category</dt><dd>${esc(r.category)}</dd>
     <dt>Type</dt><dd>${r.kind === "business" ? "Business" : "Personal"}</dd>
     <dt>Tax</dt><dd>${r.tax != null ? money(r.tax, r.currency) : "—"}</dd><dt class="total">Total</dt><dd class="total">${money(r.total, r.currency)}</dd></dl>
     ${r.photoUrl ? `<p style="margin:14px 0 0;font-size:.88rem"><a href="${esc(r.photoUrl)}" target="_blank" rel="noopener">View photo in Google Drive</a></p>` : r.hadPhoto ? `<p class="small" style="margin:14px 0 0">The photo is saved on this device and goes to Drive at the next sync.</p>` : ""}`;
@@ -510,12 +557,16 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") { if (!$("#e
 
 // ---------- CSV download ----------
 $("#exportBtn").addEventListener("click", () => {
-  const rows = live().slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  const rs = live().slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
   const q = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
-  const sum = k => rows.reduce((a, r) => a + (r[k] || 0), 0);
-  const csv = ["Date,Purchase,Store,Category,Type,Cost,Tax,Currency",
-    ...rows.map(r => [r.date, r.item, r.merchant, r.category, r.kind === "business" ? "Business" : "Personal", (r.total ?? 0).toFixed(2), r.tax != null ? r.tax.toFixed(2) : "", r.currency].map(q).join(",")),
-    "", ["TOTAL", "", "", "", "", sum("total").toFixed(2), sum("tax").toFixed(2), ""].map(q).join(",")].join("\n");
+  let sp = 0, st = 0;
+  const lines = [];
+  rs.forEach((r, ri) => lineRows(r).forEach(x => { sp += x.price || 0; st += x.tax || 0;
+    lines.push([r.date, x.item, r.merchant, r.category, r.kind === "business" ? "Business" : "Personal", x.price != null ? x.price.toFixed(2) : "", x.tax != null ? x.tax.toFixed(2) : "", r.currency, `#${ri + 1}`].map(q).join(",")); }));
+  const csv = ["Date,Item,Store,Category,Type,Price,Tax,Currency,Receipt #", ...lines, "",
+    ["ITEMS SUBTOTAL", "", "", "", "", sp.toFixed(2), "", "", ""].map(q).join(","),
+    ["TAX", "", "", "", "", "", st.toFixed(2), "", ""].map(q).join(","),
+    ["TOTAL SPENT", "", "", "", "", (sp + st).toFixed(2), "", "", `${rs.length} receipts`].map(q).join(",")].join("\n");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
   a.download = `shoebox-receipts-${todayISO()}.csv`;

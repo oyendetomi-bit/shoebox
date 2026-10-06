@@ -166,6 +166,60 @@
     return "";
   }
 
+
+  // ---------- line items ----------
+  const STOP_RE = /sub\s*-?\s*total|subtot|\btotal\b|amount\s*due|balance\s*due/i;
+  const NOT_ITEM_RE = /\b(g\.?s\.?t|h\.?s\.?t|p\.?s\.?t|q\.?s\.?t|tps|tvq|tax(es)?|change|cash|visa|mastercard|m\/c|amex|debit|interac|credit|tend(?:er|ered)?|balance|approved|auth(orization)?|card\s*#|acct|ref\s*#|trans(action)?|points|rewards|loyalty|optimum|airmiles|air\s+miles|you\s+saved|total\s+savings|items?\s+sold|tel\b|phone|fax|store\s*#|cashier|register|invoice|order\s*#|table\b|guests?|server)\b/i;
+  const DISCOUNT_RE = /saving|discount|coupon|promo|instant|rebate|\btpd\b|\boff\b|deal|reward\s+redeem/i;
+  const QTY_AT_RE = /^(\d+(?:\.\d+)?)\s*(?:x|@|ea\b|kg\s*@|lb\s*@|@\s*\$?)\s*/i;
+
+  function cleanItemName(raw) {
+    let n = raw
+      .replace(/\$?\s*-?\d{1,3}(?:[,\s]\d{3})*[.,]\d{2}\s*-?\s*[A-Z]{0,3}\s*$/, "")   // trailing price + tax flag
+      .replace(/\b\d{6,}\b/g, " ")                                                   // SKU / barcode numbers
+      .replace(/\s+(?:[A-Z]{1,2}|GP|MRJ|HMRJ|FS|NT)\s*$/, "")                         // leftover tax flags
+      .replace(/[^\w&%'+./\- ]/g, " ")
+      .replace(/\s+/g, " ").trim();
+    let qty = 1;
+    const q = n.match(/^(\d{1,2})\s+(?=[A-Za-z])/);
+    if (q && +q[1] > 0 && +q[1] < 50) { qty = +q[1]; n = n.slice(q[0].length); }
+    if (n.length > 48) n = n.slice(0, 48).trim();
+    if (/^[A-Z0-9 &%'+./-]+$/.test(n) && /[A-Z]{3}/.test(n)) n = n.split(" ").map(w => /\d/.test(w) ? w : w.charAt(0) + w.slice(1).toLowerCase()).join(" ");
+    return { name: n, qty };
+  }
+
+  /** Pull "name ... price" lines that sit above the subtotal/total. Returns [{name, price}]. */
+  function findItems(lines) {
+    let end = lines.findIndex(l => STOP_RE.test(l));
+    if (end < 0) end = lines.length;
+    // Items start after the header block: first line that has a price and isn't the date/phone line.
+    const items = [];
+    let pendingName = null;
+    for (let i = 0; i < end; i++) {
+      const l = lines[i];
+      const amts = amountsIn(l);
+      const letters = (l.match(/[A-Za-z]/g) || []).length;
+      if (!amts.length) {
+        // A name-only line (e.g. "BANANAS") whose price sits on the next "2 @ 1.07  2.14" line.
+        pendingName = letters >= 3 && !NOT_ITEM_RE.test(l) && !/\d{1,2}[:/.-]\d{2}/.test(l) ? l : null;
+        continue;
+      }
+      const price = amts[amts.length - 1];
+      if (NOT_ITEM_RE.test(l) && !(price < 0 && DISCOUNT_RE.test(l))) { pendingName = null; continue; }
+      if (Math.abs(price) > 5000) { pendingName = null; continue; }
+      let { name, qty } = cleanItemName(l);
+      const qtyLine = QTY_AT_RE.test(name) || /^\d+(\.\d+)?\s*(@|x)\s*\$?\d/i.test(l) || (letters < 3);
+      if (qtyLine && pendingName) { const c = cleanItemName(pendingName); name = c.name; qty = c.qty; }
+      else if (qtyLine && items.length && letters < 3) { items[items.length - 1].price = price; pendingName = null; continue; }
+      pendingName = null;
+      name = name.replace(QTY_AT_RE, "").replace(/^\$?\d+[.,]\d{2}\s*/, "").trim();
+      if ((name.match(/[A-Za-z]/g) || []).length < 2) continue;
+      const isDiscount = price < 0 || DISCOUNT_RE.test(name);
+      items.push({ name: (qty > 1 ? `${name} ×${qty}` : name), price: isDiscount ? -Math.abs(price) : price });
+    }
+    return items.slice(0, 80);
+  }
+
   /**
    * text: OCR output. opts.learned: {"merchant name lowercased": {category, kind}} from past receipts.
    * opts.today: "YYYY-MM-DD". opts.confidence: OCR mean confidence 0-100.
@@ -202,10 +256,11 @@
     if (!kind) kind = BUSINESS_CATS.has(category) ? "business" : "personal";
 
     const weak = how !== "total" || !merchant || !date || (opts.confidence != null && opts.confidence < 55);
-    return { merchant, date, total, tax, category, kind, item: ITEM_FOR[category] || "", confident: !weak, totalFrom: how };
+    const items = findItems(lines);
+    return { merchant, date, total, tax, category, kind, item: ITEM_FOR[category] || "", items, confident: !weak, totalFrom: how };
   }
 
-  const api = { parseReceipt, amountsIn, findDate, CATEGORIES };
+  const api = { parseReceipt, findItems, amountsIn, findDate, CATEGORIES };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.ShoeboxParse = api;
 })(typeof window !== "undefined" ? window : globalThis);
