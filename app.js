@@ -13,6 +13,7 @@ const SCOPE = "https://www.googleapis.com/auth/drive.file";
 const DAPI = "https://www.googleapis.com/drive/v3", UAPI = "https://www.googleapis.com/upload/drive/v3";
 const FOLDER = "application/vnd.google-apps.folder", SHEET = "application/vnd.google-apps.spreadsheet";
 const RECENT = 5;
+const APP_VERSION = "Version 4 · item-by-item ledger";
 const { parseReceipt, CATEGORIES } = window.ShoeboxParse;
 const $ = s => document.querySelector(s);
 
@@ -400,14 +401,55 @@ async function prepare(file) {
   try { bmp = await createImageBitmap(file, { imageOrientation: "from-image" }); } catch { bmp = await createImageBitmap(file); }
   const draw = max => { const s = Math.min(1, max / Math.max(bmp.width, bmp.height)); const c = document.createElement("canvas"); c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s); c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height); return c; };
   const photo = await new Promise(r => draw(1600).toBlob(b => r(b || file), "image/jpeg", 0.8));
-  // OCR copy: larger, grayscale, contrast-stretched
-  const c = draw(2200), ctx = c.getContext("2d"), img = ctx.getImageData(0, 0, c.width, c.height), d = img.data;
+  // OCR copy: cropped to the receipt, larger, grayscale, contrast-stretched
+  const box = findReceipt(draw(800));
+  const full = draw(2200), sx = full.width, sy = full.height;
+  const c = document.createElement("canvas");
+  c.width = Math.round((box.x1 - box.x0) * sx); c.height = Math.round((box.y1 - box.y0) * sy);
+  c.getContext("2d").drawImage(full, box.x0 * sx, box.y0 * sy, c.width, c.height, 0, 0, c.width, c.height);
+  const ctx = c.getContext("2d"), img = ctx.getImageData(0, 0, c.width, c.height), d = img.data;
   let lo = 255, hi = 0; const g = new Uint8ClampedArray(d.length / 4);
   for (let i = 0, j = 0; i < d.length; i += 4, j++) { const v = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; g[j] = v; if (v < lo) lo = v; if (v > hi) hi = v; }
   const span = Math.max(1, hi - lo);
   for (let i = 0, j = 0; i < d.length; i += 4, j++) { const v = Math.min(255, Math.max(0, (g[j] - lo) * 255 / span)); d[i] = d[i + 1] = d[i + 2] = v; }
   ctx.putImageData(img, 0, 0);
   return { photo, ocrCanvas: c };
+}
+// Find the receipt in a photo by where the printed text is (works on any background and lighting).
+// Returns the box as fractions of the image: {x0, y0, x1, y1}.
+function findReceipt(c) {
+  try {
+    const w = c.width, h = c.height, d = c.getContext("2d").getImageData(0, 0, w, h).data;
+    const g = new Float32Array(w * h);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) g[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    // local mean via integral image (7x7 box), ink = clearly darker than its surroundings
+    const I = new Float64Array((w + 1) * (h + 1));
+    for (let y = 0; y < h; y++) { let row = 0; for (let x = 0; x < w; x++) { row += g[y * w + x]; I[(y + 1) * (w + 1) + x + 1] = I[y * (w + 1) + x + 1] + row; } }
+    const r = 3, colInk = new Float32Array(w), ink = new Uint8Array(w * h);
+    for (let y = r; y < h - r; y++) for (let x = r; x < w - r; x++) {
+      const x0 = x - r, y0 = y - r, x1 = x + r + 1, y1 = y + r + 1;
+      const mean = (I[y1 * (w + 1) + x1] - I[y0 * (w + 1) + x1] - I[y1 * (w + 1) + x0] + I[y0 * (w + 1) + x0]) / 49;
+      if (mean - g[y * w + x] > 18) { ink[y * w + x] = 1; colInk[x]++; }
+    }
+    const smooth = (v, k) => { const o = new Float32Array(v.length); let acc = 0; for (let i = 0; i < v.length + k; i++) { if (i < v.length) acc += v[i]; if (i >= k) acc -= v[i - k]; const j = i - (k >> 1); if (j >= 0 && j < v.length) o[j] = acc / k; } return o; };
+    const cs = smooth(Array.from(colInk, v => v / h), Math.max(3, Math.round(w / 40)));
+    const cmax = Math.max(...cs); if (cmax <= 0) throw 0;
+    const t = Math.max(cmax * 0.25, 0.01), gap = Math.round(w / 20);
+    let best = null, start = -1, last = -1, sum = 0;
+    for (let x = 0; x <= w; x++) {
+      const on = x < w && cs[x] > t;
+      if (on) { if (start < 0 || x - last > gap) { if (start >= 0 && (!best || sum > best.sum)) best = { a: start, b: last, sum }; start = x; sum = 0; } last = x; sum += cs[x]; }
+    }
+    if (start >= 0 && (!best || sum > best.sum)) best = { a: start, b: last, sum };
+    const rowInk = new Float32Array(h);
+    for (let y = 0; y < h; y++) { let n = 0; for (let x = best.a; x <= best.b; x++) n += ink[y * w + x]; rowInk[y] = n / (best.b - best.a + 1); }
+    const rs = smooth(rowInk, Math.max(3, Math.round(h / 60))), rmax = Math.max(...rs), tr = Math.max(rmax * 0.12, 0.005);
+    let y0 = rs.findIndex(v => v > tr), y1 = h - 1 - [...rs].reverse().findIndex(v => v > tr);
+    const px = Math.round(w * 0.03);
+    const box = { x0: Math.max(0, best.a - px) / w, x1: Math.min(w, best.b + px) / w, y0: Math.max(0, y0 - px) / h, y1: Math.min(h, y1 + px) / h };
+    if (box.x1 - box.x0 < 0.15 || box.y1 - box.y0 < 0.15) throw 0;      // too small: don't trust it
+    return box;
+  } catch { return { x0: 0, y0: 0, x1: 1, y1: 1 }; }
 }
 function learnedMap() {
   const m = {};
@@ -464,39 +506,69 @@ function openEdit({ title, receipt, photo, previewUrl }) {
   const pv = $("#editPreview");
   if (previewUrl) { pv.src = previewUrl; pv.hidden = false; } else { pv.hidden = true; pv.removeAttribute("src"); }
   fillForm(receipt || {}); $("#readStatus").hidden = true; $("#ocrDetails").hidden = true; $("#saveBtn").disabled = false;
+  form.readTok = null;
+  $("#rereadBtn").hidden = !(receipt?.photoId);
   $("#editSheet").hidden = false;
 }
-const closeEdit = () => { $("#editSheet").hidden = true; form.photo = null; form.editing = null; };
+const closeEdit = () => { $("#editSheet").hidden = true; form.photo = null; form.editing = null; form.readTok = null; };
 $("#editClose").addEventListener("click", closeEdit);
 $("#manualBtn").addEventListener("click", () => openEdit({ title: "Add a receipt" }));
 
-async function onPhoto(file) {
+// reread = true: reading a saved receipt's photo again from Drive. Only items (and empty fields) are filled,
+// and the photo isn't uploaded again.
+async function onPhoto(file, reread = false) {
   if (!file) return;
-  openEdit({ title: "Check this receipt", previewUrl: URL.createObjectURL(file) });
+  if (!reread) openEdit({ title: "Check this receipt", previewUrl: URL.createObjectURL(file) });
+  else { const pv = $("#editPreview"); pv.src = URL.createObjectURL(file); pv.hidden = false; }
+  const tok = form.readTok = {};
   readMsg("Getting the photo ready…", true, null);
   let prepared;
   try { prepared = await prepare(file); } catch { readMsg("That photo couldn't be opened. Try another one, or type the details.", false, null); return; }
-  form.photo = prepared.photo;
-  const mine = prepared.photo;
+  if (form.readTok !== tok) return;
+  if (!reread) form.photo = prepared.photo;
   $("#saveBtn").disabled = true;
   progressCb = m => {
-    if (form.photo !== mine) return;
+    if (form.readTok !== tok) return;
     if (m.status === "recognizing text") readMsg("Reading the receipt…", true, m.progress);
     else if (/loading|initializ/.test(m.status)) readMsg("Setting up the reader (first time only)…", true, m.progress || 0);
   };
   try {
     const w = await getWorker();
     const { data } = await w.recognize(prepared.ocrCanvas);
-    if (form.photo !== mine || $("#editSheet").hidden) return;
+    if (form.readTok !== tok || $("#editSheet").hidden) return;
     const r = parseReceipt(data.text, { today: todayISO(), learned: learnedMap(), confidence: data.confidence });
-    fillForm({ ...r, currency: "CAD" });
-    form.lowConf = !r.confident; form.ocrText = data.text;
+    form.ocrText = data.text;
     $("#ocrText").textContent = data.text.trim() || "(no text found)"; $("#ocrDetails").hidden = false;
-    readMsg(r.total == null ? "Couldn't find the total. Please fill in the details." : r.confident ? (r.items.length ? `Done. Found ${r.items.length} item${r.items.length > 1 ? "s" : ""}. Check them and save.` : "Done. No item lines found; add them below if you like.") : "Some parts were hard to read. Please double-check the store, date and total.", false, null);
+    if (reread) {
+      setItems(r.items);
+      if (!$("#fTax").value && r.tax != null) $("#fTax").value = r.tax.toFixed(2);
+      if (!$("#fTotal").value && r.total != null) $("#fTotal").value = r.total.toFixed(2);
+      checkItems();
+      readMsg(r.items.length ? `Found ${r.items.length} item${r.items.length > 1 ? "s" : ""}. Check them and save.` : "No item lines found on this photo. You can add them by hand.", false, null);
+      return;
+    }
+    fillForm({ ...r, currency: "CAD" });
+    form.lowConf = !r.confident;
+    const unread = r.items.filter(i => i.name === "Unreadable item").length;
+    readMsg(r.total == null ? "Couldn't find the total. Please fill in the details."
+      : !r.confident ? "Some parts were hard to read. Please double-check the store, date and total."
+      : r.items.length ? `Done. Found ${r.items.length} item${r.items.length > 1 ? "s" : ""}${unread ? `; ${unread} name${unread > 1 ? "s were" : " was"} too faint to read, so rename those` : ""}. Check them and save.`
+      : "Done. No item lines found; add them below if you like.", false, null);
   } catch {
     readMsg(navigator.onLine ? "Couldn't read this one. Fill in the details below." : "The reader needs internet the first time. Fill in the details, or try again online.", false, null);
-  } finally { if (form.photo === mine) $("#saveBtn").disabled = false; progressCb = null; }
+  } finally { if (form.readTok === tok) { $("#saveBtn").disabled = false; progressCb = null; } }
 }
+// "Read photo again" for a saved receipt whose photo is in Drive.
+$("#rereadBtn").addEventListener("click", async () => {
+  const r = form.editing; if (!r?.photoId) return;
+  if (!hasToken()) { signIn().then(() => $("#rereadBtn").click(), () => toast("Connect Google Drive first.")); return; }
+  readMsg("Fetching the photo from Google Drive…", true, null);
+  try {
+    const res = await fetch(`${DAPI}/files/${r.photoId}?alt=media`, { headers: { Authorization: "Bearer " + token.value } });
+    if (!res.ok) throw res.status;
+    onPhoto(await res.blob(), true);
+  } catch { readMsg("Couldn't fetch the photo from Drive. Check your connection and try again.", false, null); }
+});
 $("#camInput").addEventListener("change", e => { onPhoto(e.target.files[0]); e.target.value = ""; });
 $("#libInput").addEventListener("change", e => { onPhoto(e.target.files[0]); e.target.value = ""; });
 
@@ -576,7 +648,25 @@ $("#exportBtn").addEventListener("click", () => {
 
 // ---------- boot ----------
 showSetup(false); render(); showInstall();
-if ("serviceWorker" in navigator) addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+// Updates: look for a new version whenever the app is opened or brought back, and switch to it straight away
+// (unless a receipt is open on screen, then on the next open).
+if ("serviceWorker" in navigator) {
+  let reloading = false;
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!hadController || reloading) return;
+    if (!$("#editSheet").hidden) { LS.set("reloadPending", true); return; }
+    reloading = true; location.reload();
+  });
+  addEventListener("load", () => navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then(reg => {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "visible") return;
+      if (LS.get("reloadPending", false) && $("#editSheet").hidden) { LS.set("reloadPending", false); location.reload(); return; }
+      reg.update().catch(() => {});
+    });
+  }).catch(() => {}));
+}
+$("#appVersion").textContent = APP_VERSION;
 const whenGis = setInterval(() => { if (window.google?.accounts?.oauth2) { clearInterval(whenGis); initTokenClient(); } }, 300);
 setTimeout(() => clearInterval(whenGis), 20000);
 if (hasToken()) sync();

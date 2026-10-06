@@ -1,5 +1,5 @@
 /* Shoebox service worker: lets the app open offline and caches the receipt reader after first use. */
-const VERSION = "shoebox-v3";
+const VERSION = "shoebox-v4";
 const SHELL = ["./", "index.html", "styles.css", "app.js", "parse.js", "manifest.webmanifest",
   "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png", "icons/favicon.png"];
 
@@ -18,7 +18,7 @@ self.addEventListener("fetch", e => {
   const url = new URL(req.url);
   // App files: network first so updates arrive, cache when offline.
   if (url.origin === self.location.origin) {
-    e.respondWith(fetch(req).then(res => {
+    e.respondWith(fetch(req, { cache: "no-store" }).then(res => {
       const copy = res.clone(); caches.open(VERSION).then(c => c.put(req, copy)); return res;
     }).catch(() => caches.match(req, { ignoreSearch: true }).then(r => r || caches.match("index.html"))));
     return;

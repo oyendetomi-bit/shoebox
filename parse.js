@@ -174,18 +174,23 @@
   const QTY_AT_RE = /^(\d+(?:\.\d+)?)\s*(?:x|@|ea\b|kg\s*@|lb\s*@|@\s*\$?)\s*/i;
 
   function cleanItemName(raw) {
-    let n = raw
-      .replace(/\$?\s*-?\d{1,3}(?:[,\s]\d{3})*[.,]\d{2}\s*-?\s*[A-Z]{0,3}\s*$/, "")   // trailing price + tax flag
+    // The name is whatever comes before the first price on the line.
+    const m = /-?\$?\s?\d{1,3}(?:[,\s]\d{3})*\s?[.,]\s?\d{2}(?!\d)/.exec(raw);
+    let n = (m ? raw.slice(0, m.index) : raw)
       .replace(/\b\d{6,}\b/g, " ")                                                   // SKU / barcode numbers
-      .replace(/\s+(?:[A-Z]{1,2}|GP|MRJ|HMRJ|FS|NT)\s*$/, "")                         // leftover tax flags
       .replace(/[^\w&%'+./\- ]/g, " ")
       .replace(/\s+/g, " ").trim();
-    let qty = 1;
-    const q = n.match(/^(\d{1,2})\s+(?=[A-Za-z])/);
-    if (q && +q[1] > 0 && +q[1] < 50) { qty = +q[1]; n = n.slice(q[0].length); }
+    // Drop stray lowercase specks the camera picked up from the background, when the receipt itself prints in capitals.
+    const toks = n.split(" "), caps = toks.filter(t => /[A-Z]{2,}/.test(t) && t === t.toUpperCase()).length;
+    if (caps >= 1 && caps >= toks.filter(t => /[A-Za-z]/.test(t)).length * 0.5) {
+      while (toks.length > 1 && toks[0].length <= 4 && !(/[A-Z]{2,}/.test(toks[0]) || /^\d/.test(toks[0]))) toks.shift();
+      while (toks.length > 1 && toks[toks.length - 1].length <= 3 && !/[A-Z0-9]{2,}|%/.test(toks[toks.length - 1])) toks.pop();
+      n = toks.join(" ");
+    }
+    n = n.replace(/^1\s+(?=[A-Za-z])/, "").replace(/\s+\d{1,2}$/, (x) => /[A-Za-z]{3}/.test(n) ? x : "").trim();
     if (n.length > 48) n = n.slice(0, 48).trim();
     if (/^[A-Z0-9 &%'+./-]+$/.test(n) && /[A-Z]{3}/.test(n)) n = n.split(" ").map(w => /\d/.test(w) ? w : w.charAt(0) + w.slice(1).toLowerCase()).join(" ");
-    return { name: n, qty };
+    return { name: n, qty: 1 };
   }
 
   /** Pull "name ... price" lines that sit above the subtotal/total. Returns [{name, price}]. */
@@ -196,24 +201,29 @@
     const items = [];
     let pendingName = null;
     for (let i = 0; i < end; i++) {
-      const l = lines[i];
+      // "$12,008" / "$1,780": a price whose tax letter (J, D, H) was read as a digit -> "$12.00", "$1.78"
+      const l = /\d{8,}/.test(lines[i]) ? lines[i].replace(/\$\s?(\d{1,3})[,.](\d{2})\d\b/g, "$$$1.$2") : lines[i];
       const amts = amountsIn(l);
       const letters = (l.match(/[A-Za-z]/g) || []).length;
       if (!amts.length) {
-        // A name-only line (e.g. "BANANAS") whose price sits on the next "2 @ 1.07  2.14" line.
+        // A name-only line (e.g. "BANANAS") whose price sits on the next line.
         pendingName = letters >= 3 && !NOT_ITEM_RE.test(l) && !/\d{1,2}[:/.-]\d{2}/.test(l) ? l : null;
         continue;
       }
-      const price = amts[amts.length - 1];
+      let price = amts[amts.length - 1];
+      // "qty  unit-price  amount": if the two prices disagree, one was misread; a zero is never right, otherwise trust the larger.
+      if (amts.length >= 2) { const u = amts[amts.length - 2]; if (u !== price && u > 0 && price >= 0) price = price === 0 ? u : Math.max(u, price); }
       if (NOT_ITEM_RE.test(l) && !(price < 0 && DISCOUNT_RE.test(l))) { pendingName = null; continue; }
       if (Math.abs(price) > 5000) { pendingName = null; continue; }
       let { name, qty } = cleanItemName(l);
-      const qtyLine = QTY_AT_RE.test(name) || /^\d+(\.\d+)?\s*(@|x)\s*\$?\d/i.test(l) || (letters < 3);
-      if (qtyLine && pendingName) { const c = cleanItemName(pendingName); name = c.name; qty = c.qty; }
-      else if (qtyLine && items.length && letters < 3) { items[items.length - 1].price = price; pendingName = null; continue; }
+      const nameLetters = (name.match(/[A-Za-z]/g) || []).length;
+      const ownLine = /\d{8,}/.test(l) || /\$\s?\d/.test(l);          // barcode or $-price: this line is an item by itself
+      const priceOnly = /^\d+(\.\d+)?\s*(@|x)\s*\$?\d/i.test(l) || QTY_AT_RE.test(name) || /^\W{0,3}\d{5,7}\s/.test(l) || nameLetters < 3 || (pendingName && nameLetters <= 4 && amts.length >= 2);
+      if (pendingName && priceOnly && !/\d{8,}/.test(l)) { name = cleanItemName(pendingName).name; }
+      else if (priceOnly && !ownLine && items.length && !pendingName) { items[items.length - 1].price = price; continue; }   // price continued on the next line
+      else if (nameLetters < 3 || !/[A-Z]{2,}|\b[A-Z][a-z]{2,}|\b[a-z]{4,}/.test(name)) name = "Unreadable item";
       pendingName = null;
-      name = name.replace(QTY_AT_RE, "").replace(/^\$?\d+[.,]\d{2}\s*/, "").trim();
-      if ((name.match(/[A-Za-z]/g) || []).length < 2) continue;
+      name = name.replace(QTY_AT_RE, "").replace(/^\$?\d+[.,]\d{2}\s*/, "").trim() || "Unreadable item";
       const isDiscount = price < 0 || DISCOUNT_RE.test(name);
       items.push({ name: (qty > 1 ? `${name} ×${qty}` : name), price: isDiscount ? -Math.abs(price) : price });
     }

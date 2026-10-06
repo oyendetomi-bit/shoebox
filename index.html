@@ -109,6 +109,7 @@
       <span class="spin" id="readSpin"></span><span class="grow" id="readMsg">Reading your receipt…</span>
       <span class="progress" id="readBarWrap"><i id="readBar"></i></span>
     </div>
+    <button type="button" class="chip" id="rereadBtn" hidden>Read photo again to list the items</button>
     <details id="ocrDetails" hidden><summary class="small">Show the text it read</summary><pre class="ocrtext" id="ocrText"></pre></details>
     <form class="form" id="editForm" novalidate>
       <div class="field full"><label for="fItem">Short description</label><input id="fItem" placeholder="e.g. Weekly groceries, printer ink" autocomplete="off"></div>
@@ -160,6 +161,7 @@
       <div class="actions"><button type="button" class="danger" id="disconnectBtn">Disconnect this device</button></div>
       <p class="small">Disconnecting only signs this device out. Your receipts stay in Google Drive.</p>
     </div>
+    <p class="small" id="appVersion" style="text-align:center"></p>
   </div>
 </div>
 
