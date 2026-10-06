@@ -7,7 +7,7 @@
 */
 (() => {
 "use strict";
-const BUILT_IN_CLIENT_ID = "";               // optional: paste a Client ID here to skip the setup screen
+const BUILT_IN_CLIENT_ID = "551594370383-j0skc5pb0vb67jgmgqm6rohgfslv1pou.apps.googleusercontent.com";
 const ROOT_NAME = "Tomi's Shoebox", DATA_NAME = "shoebox-data.json", LEDGER_NAME = "Shoebox Ledger";
 const SCOPE = "https://www.googleapis.com/auth/drive.file";
 const DAPI = "https://www.googleapis.com/drive/v3", UAPI = "https://www.googleapis.com/upload/drive/v3";
