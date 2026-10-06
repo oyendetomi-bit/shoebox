@@ -1,5 +1,5 @@
 /* Shoebox service worker: lets the app open offline and caches the receipt reader after first use. */
-const VERSION = "shoebox-v4";
+const VERSION = "shoebox-v5";
 const SHELL = ["./", "index.html", "styles.css", "app.js", "parse.js", "manifest.webmanifest",
   "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png", "icons/favicon.png"];
 

@@ -13,7 +13,7 @@ const SCOPE = "https://www.googleapis.com/auth/drive.file";
 const DAPI = "https://www.googleapis.com/drive/v3", UAPI = "https://www.googleapis.com/upload/drive/v3";
 const FOLDER = "application/vnd.google-apps.folder", SHEET = "application/vnd.google-apps.spreadsheet";
 const RECENT = 5;
-const APP_VERSION = "Version 4 · item-by-item ledger";
+const APP_VERSION = "Version 5 · item-by-item ledger";
 const { parseReceipt, CATEGORIES } = window.ShoeboxParse;
 const $ = s => document.querySelector(s);
 
@@ -258,6 +258,7 @@ async function sync() {
     if (!drive.dataId) { const f = await multipart({ name: DATA_NAME, parents: [drive.rootId], mimeType: "application/json" }, data, "application/json"); drive.dataId = f.id; }
     await writeLedger();
     drive.lastSync = Date.now(); drive.dirty = false; saveLocal();
+    setTimeout(backfillItems, 300);
   } catch (e) {
     if (e?.status === 404 && drive.rootId) { drive = { folders: {} }; saveLocal(); again = true; }   // folder was deleted: start fresh
     syncErr = e?.code === "auth" ? "auth" : e?.code === "offline" ? "offline" : (e?.message || "Google Drive refused the change.");
@@ -267,12 +268,45 @@ async function sync() {
     if (again) { again = false; setTimeout(sync, 400); }
   }
 }
+// Receipts saved before item reading existed have no item list. Read their photos from Drive
+// in the background (one at a time) and add the items, then re-sync so the ledger is itemized.
+let backfilling = false, backfillMsg = "";
+async function backfillItems() {
+  if (backfilling || !hasToken() || !window.Tesseract) return;
+  const todo = live().filter(r => r.photoId && r.items === undefined);
+  if (!todo.length) return;
+  backfilling = true;
+  let done = 0;
+  try {
+    for (const r of todo) {
+      backfillMsg = `Listing the items on ${todo.length === 1 ? "a saved receipt" : `saved receipts (${done + 1} of ${todo.length})`}…`; setSync();
+      let res;
+      try { res = await fetch(`${DAPI}/files/${r.photoId}?alt=media`, { headers: { Authorization: "Bearer " + token.value } }); } catch { break; }
+      if (res.status === 401) { token = null; LS.del("token"); break; }
+      if (!res.ok) { Object.assign(r, { items: [], updatedAt: Date.now() }); saveLocal(); continue; }
+      const prepared = await prepare(await res.blob());
+      const { data } = await (await getWorker()).recognize(prepared.ocrCanvas);
+      const p = parseReceipt(data.text, { today: todayISO(), learned: learnedMap(), confidence: data.confidence });
+      const cur = receipts.find(x => x.id === r.id);
+      if (!cur || cur.deleted || cur.items !== undefined) continue;
+      const itemSum = p.items.reduce((a, i) => a + i.price, 0);
+      // If the photo's tax makes the items add up exactly and the saved tax doesn't, the saved tax was a misread.
+      const fixTax = p.tax != null && cur.total != null && Math.abs(itemSum + p.tax - cur.total) < 0.005 && Math.abs(itemSum + (cur.tax || 0) - cur.total) >= 0.005;
+      Object.assign(cur, { items: p.items, ...(fixTax ? { tax: p.tax } : {}), needsCheck: cur.needsCheck || p.items.some(i => i.name === "Unreadable item"), updatedAt: Date.now() });
+      drive.dirty = true; saveLocal(); render(); done++;
+    }
+  } catch {} finally {
+    backfilling = false; backfillMsg = "";
+    if (done) { toast(`Listed the items on ${done} saved receipt${done > 1 ? "s" : ""}.`); sync(); } else setSync();
+  }
+}
 function setSync() {
   const dot = $("#syncDot"), msg = $("#syncMsg"), btn = $("#syncBtn");
   const unsynced = drive.dirty || receipts.some(r => !r.deleted && !r.photoId && r.hadPhoto);
   btn.hidden = true;
   if (!clientId) { dot.className = "dot err"; msg.textContent = "Saved on this device. Set up Google Drive to file your receipts."; return; }
   if (syncing) { dot.className = "dot busy"; msg.textContent = "Saving to Google Drive…"; return; }
+  if (backfilling) { dot.className = "dot busy"; msg.textContent = backfillMsg; return; }
   if (!hasToken()) { dot.className = "dot err"; msg.textContent = unsynced ? "Saved on this device. Connect Google Drive to file it." : "Connect Google Drive to sync."; btn.hidden = false; btn.textContent = "Connect"; return; }
   if (syncErr === "offline") { dot.className = "dot err"; msg.textContent = "You're offline. Receipts are saved here and will sync later."; btn.hidden = false; btn.textContent = "Try again"; return; }
   if (syncErr) { dot.className = "dot err"; msg.textContent = "Sync didn't finish: " + syncErr; btn.hidden = false; btn.textContent = "Try again"; return; }
