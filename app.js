@@ -13,7 +13,7 @@ const SCOPE = "https://www.googleapis.com/auth/drive.file";
 const DAPI = "https://www.googleapis.com/drive/v3", UAPI = "https://www.googleapis.com/upload/drive/v3";
 const FOLDER = "application/vnd.google-apps.folder", SHEET = "application/vnd.google-apps.spreadsheet";
 const RECENT = 5;
-const APP_VERSION = "Version 9 · several receipts at once";
+const APP_VERSION = "Version 10 · ledger sheets, better PDFs";
 const { parseReceipt, CATEGORIES } = window.ShoeboxParse;
 const $ = s => document.querySelector(s);
 
@@ -221,6 +221,19 @@ function catOptions(selected, { same = false } = {}) {
     `<option value="__new__">＋ New category…</option>`;
 }
 
+// ---------- ledger sheets (extra tabs in the ledger, e.g. Home Essentials) ----------
+if (!LS.get("sheetsSeeded", false)) { const m = LS.get("customSheets", []); if (!m.includes("Home Essentials")) m.push("Home Essentials"); LS.set("customSheets", m); LS.set("sheetsSeeded", true); }
+function allSheets() {
+  const set = new Set(LS.get("customSheets", []));
+  receipts.forEach(r => { if (!r.deleted && r.sheet) set.add(r.sheet); });
+  return [...set].filter(Boolean).sort((a, b) => a.localeCompare(b));
+}
+function sheetOptions(selected) {
+  const list = allSheets();
+  if (selected && !list.includes(selected)) list.push(selected);
+  return `<option value="">Main ledger only</option>` + list.map(x => `<option${x === selected ? " selected" : ""}>${esc(x)}</option>`).join("") + `<option value="__new__">＋ New sheet…</option>`;
+}
+
 // ---------- ledger ----------
 // One row per item. Tax gets its own row, and any gap between the items and the total
 // becomes an "other charges" or "discounts" row, so every receipt adds up to what you paid.
@@ -290,15 +303,88 @@ function ledgerCSV(receiptsSorted) {
   }
   return out.map(r => r.map(q).join(",")).join("\n");
 }
+// The ledger as a workbook: "All receipts" plus one tab per ledger sheet. Google turns it into a Google Sheet.
+const XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+let xlsxP = null;
+function loadXlsx() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  if (!xlsxP) xlsxP = new Promise((res, rej) => {
+    const s = document.createElement("script"); s.src = "vendor/xlsx.mini.min.js";
+    s.onload = () => window.XLSX ? res(window.XLSX) : rej(new Error("spreadsheet writer didn't start"));
+    s.onerror = () => { xlsxP = null; rej(new Error("spreadsheet writer didn't load")); };
+    document.head.appendChild(s);
+  });
+  return xlsxP;
+}
+function ledgerTab(XLSX, rs, numberOf, { withSheet }) {
+  const N = v => ({ t: "n", v: Math.round(v * 100) / 100, z: "#,##0.00" });
+  const F = f => ({ t: "n", f, z: "#,##0.00" });
+  const C = f => ({ t: "n", f });
+  const S = v => ({ t: "s", v: String(v ?? "") });
+  const head = ["Date", "Item", "Store", "Category", "Type", "Price", "Tax", "Currency", "Receipt total", "Receipt #", "Photo / file", "Year"].concat(withSheet ? ["Sheet"] : []);
+  const out = [head.map(S)];
+  rs.forEach(r => {
+    lineRows(r).forEach((x, i) => {
+      const link = receiptLink(r), n = atts(r).length;
+      const label = n > 1 ? `View ${n} files` : n && isImage(atts(r)[0].type) ? "View photo" : "View file";
+      const row = [S(r.date), S(x.item), S(r.merchant), S(x.cat), S(r.kind === "business" ? "Business" : "Personal"),
+        x.price != null ? N(x.price) : S(""), x.tax != null ? N(x.tax) : S(""), S(r.currency),
+        i === 0 ? N(r.total ?? 0) : S(""), S(`#${numberOf.get(r.id)}`),
+        i === 0 && link ? { t: "s", f: `HYPERLINK("${link}","${label}")`, v: label } : S(""),
+        { t: "n", v: +((r.date || "").slice(0, 4)) || 0 }].concat(withSheet ? [S(r.sheet || "")] : []);
+      out.push(row);
+    });
+  });
+  const n = Math.max(out.length, 2), R = c => `$${c}$2:$${c}$${n}`;
+  const Fr = R("F"), G = R("G"), D = R("D"), E = R("E"), J = R("J"), L = R("L"), M = R("M");
+  const blank = k => Array.from({ length: k }, () => S(""));
+  const label = t => ({ t: "s", v: t });
+  const years = [...new Set(rs.map(r => (r.date || "").slice(0, 4)).filter(Boolean))].sort().reverse();
+  const mixed = new Set(rs.map(r => r.currency)).size > 1;
+  for (const y of years) {
+    const yc = `${L},${y}`, inYear = rs.filter(r => (r.date || "").startsWith(y));
+    out.push([]);
+    out.push([label(`${y} TOTAL SPENT${mixed ? " (all currencies)" : ""}`), ...blank(4), F(`SUMIFS(${Fr},${yc})+SUMIFS(${G},${yc})`), S(""), S(""), S(""), { t: "s", f: `COUNTUNIQUEIFS(${J},${yc})&" receipts"`, v: "" }]);
+    out.push([label(`${y} BY CATEGORY`), ...blank(4), label("Items"), label("Tax"), S(""), label("Total"), label("Receipts")]);
+    allCategories().filter(c => inYear.some(r => lineRows(r).some(x => x.cat === c))).forEach(c => {
+      const q = `"${c.replace(/"/g, '""')}"`;
+      out.push([S(c), ...blank(4), F(`SUMIFS(${Fr},${yc},${D},${q})`), F(`SUMIFS(${G},${yc},${D},${q})`), S(""), F(`SUMIFS(${Fr},${yc},${D},${q})+SUMIFS(${G},${yc},${D},${q})`), C(`COUNTUNIQUEIFS(${J},${yc},${D},${q})`)]);
+    });
+    out.push([label(`${y} BY TYPE`), ...blank(4), label("Items"), label("Tax"), S(""), label("Total"), label("Receipts")]);
+    ["Personal", "Business"].filter(k => inYear.some(r => (r.kind === "business") === (k === "Business"))).forEach(k =>
+      out.push([S(k), ...blank(4), F(`SUMIFS(${Fr},${yc},${E},"${k}")`), F(`SUMIFS(${G},${yc},${E},"${k}")`), S(""), F(`SUMIFS(${Fr},${yc},${E},"${k}")+SUMIFS(${G},${yc},${E},"${k}")`), C(`COUNTUNIQUEIFS(${J},${yc},${E},"${k}")`)]));
+    if (withSheet) {
+      const sheets = [...new Set(inYear.map(r => r.sheet).filter(Boolean))].sort();
+      if (sheets.length) {
+        out.push([label(`${y} BY SHEET`), ...blank(4), label("Items"), label("Tax"), S(""), label("Total"), label("Receipts")]);
+        sheets.forEach(sh => { const q = `"${sh.replace(/"/g, '""')}"`; out.push([S(sh), ...blank(4), F(`SUMIFS(${Fr},${yc},${M},${q})`), F(`SUMIFS(${G},${yc},${M},${q})`), S(""), F(`SUMIFS(${Fr},${yc},${M},${q})+SUMIFS(${G},${yc},${M},${q})`), C(`COUNTUNIQUEIFS(${J},${yc},${M},${q})`)]); });
+      }
+    }
+  }
+  if (years.length > 1) { out.push([]); out.push([label(`ALL YEARS TOTAL SPENT${mixed ? " (all currencies)" : ""}`), ...blank(4), F(`SUM(${Fr})+SUM(${G})`), S(""), S(""), S(""), { t: "s", f: `COUNTUNIQUE(${J})&" receipts"`, v: "" }]); }
+  if (!rs.length) out.push([S("No receipts on this sheet yet. In Shoebox, choose this sheet under \"Ledger sheet\" when you save a receipt.")]);
+  const ws = XLSX.utils.aoa_to_sheet(out);
+  ws["!cols"] = [11, 34, 22, 18, 10, 11, 9, 9, 13, 10, 14, 6, 18].map(w => ({ wch: w }));
+  return ws;
+}
+async function ledgerWorkbook() {
+  const XLSX = await loadXlsx();
+  const rs = live().slice().sort((a, b) => (a.date || "").localeCompare(b.date || "") || (a.createdAt || 0) - (b.createdAt || 0));
+  const numberOf = new Map(rs.map((r, i) => [r.id, i + 1]));
+  const wb = XLSX.utils.book_new(), used = new Set();
+  const tabName = t => { let n = String(t).replace(/[\[\]:*?\/\\]/g, " ").trim().slice(0, 31) || "Sheet"; let k = n, i = 2; while (used.has(k.toLowerCase())) k = `${n.slice(0, 28)} ${i++}`; used.add(k.toLowerCase()); return k; };
+  XLSX.utils.book_append_sheet(wb, ledgerTab(XLSX, rs, numberOf, { withSheet: true }), tabName("All receipts"));
+  for (const sh of allSheets()) XLSX.utils.book_append_sheet(wb, ledgerTab(XLSX, rs.filter(r => r.sheet === sh), numberOf, { withSheet: false }), tabName(sh));
+  return new Blob([XLSX.write(wb, { bookType: "xlsx", type: "array", compression: true })], { type: XLSX_TYPE });
+}
 async function writeLedger() {
-  const rows = live().slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-  const csv = new Blob([ledgerCSV(rows)], { type: "text/csv" });
+  const file = await ledgerWorkbook();
   if (drive.ledgerId) {
-    try { const f = await updateMedia(drive.ledgerId, csv, "text/csv"); if (f?.webViewLink) drive.ledgerUrl = f.webViewLink; return; }
+    try { const f = await updateMedia(drive.ledgerId, file, XLSX_TYPE); if (f?.webViewLink) drive.ledgerUrl = f.webViewLink; return; }
     catch (e) { if (e.code !== "http") throw e; }
   }
   const old = drive.ledgerId;
-  const f = await multipart({ name: LEDGER_NAME, mimeType: SHEET, parents: [drive.rootId] }, csv, "text/csv");
+  const f = await multipart({ name: LEDGER_NAME, mimeType: SHEET, parents: [drive.rootId] }, file, XLSX_TYPE);
   drive.ledgerId = f.id; drive.ledgerUrl = f.webViewLink;
   if (old) { try { await trash(old); } catch {} }
 }
@@ -530,7 +616,7 @@ function render() {
   $("#recentNote").textContent = all.length > RECENT ? `${all.length - RECENT} more in your ledger` : "";
   $("#list").innerHTML = recent.length ? `<ul class="list">${recent.map(r => `<li><button class="row" type="button" data-id="${esc(r.id)}">
       <span class="tab ${r.kind === "business" ? "biz" : ""}"></span><span style="min-width:0"><div class="who">${esc(r.item || (r.items?.length ? r.items[0].name + (r.items.length > 1 ? ` + ${r.items.length - 1} more` : "") : "") || r.merchant || "Receipt")}</div>
-        <div class="meta"><span class="num">${esc(r.date || "")}</span><span>${esc(r.item ? r.merchant : "")}</span><span class="pill ${r.kind === "business" ? "biz" : ""}">${esc(r.category)}</span>${r.needsCheck ? `<span class="pill warn">Check</span>` : ""}${atts(r).some(a => a.pending) ? `<span class="pill warn">Not in Drive yet</span>` : ""}${atts(r).length > 1 ? `<span class="pill">${atts(r).length} files</span>` : ""}</div></span>
+        <div class="meta"><span class="num">${esc(r.date || "")}</span><span>${esc(r.item ? r.merchant : "")}</span><span class="pill ${r.kind === "business" ? "biz" : ""}">${esc(r.category)}</span>${r.needsCheck ? `<span class="pill warn">Check</span>` : ""}${atts(r).some(a => a.pending) ? `<span class="pill warn">Not in Drive yet</span>` : ""}${atts(r).length > 1 ? `<span class="pill">${atts(r).length} files</span>` : ""}${r.sheet ? `<span class="pill sheetpill">${esc(r.sheet)}</span>` : ""}</div></span>
       <span class="amt">${money(r.total, r.currency)}</span></button></li>`).join("")}</ul>`
     : `<div class="empty"><strong>Nothing in the box yet</strong>Only your last five receipts show here. Everything else lives in your Drive folder and ledger.</div>`;
   renderAccount(); setSync();
@@ -627,9 +713,18 @@ async function textFrom(blob, type, onPage) {
       onPage && onPage(n, doc.numPages);
       const page = await doc.getPage(n);
       const tc = await page.getTextContent();
+      // Keep the PDF's own reading order (it follows the receipt: item name, then its code and price).
+      // Sorting strictly by height can put a price above its name when the two sit a hair apart.
       const rows = [];
-      tc.items.forEach(it => { if (!it.str.trim()) return; const y = Math.round(it.transform[5]); let row = rows.find(r => Math.abs(r.y - y) <= 3); if (!row) rows.push(row = { y, parts: [] }); row.parts.push({ x: it.transform[4], s: it.str }); });
-      let text = rows.sort((a, b) => b.y - a.y).map(r => r.parts.sort((a, b) => a.x - b.x).map(p => p.s).join(" ").replace(/\s+/g, " ").trim()).join("\n");
+      let cur = null;
+      tc.items.forEach(it => {
+        if (!it.str.trim()) { if (it.hasEOL) cur = null; return; }
+        const y = Math.round(it.transform[5]);
+        if (!cur || Math.abs(cur.y - y) > 3) rows.push(cur = { y, parts: [] });
+        cur.parts.push({ x: it.transform[4], s: it.str });
+        if (it.hasEOL) cur = null;
+      });
+      let text = rows.map(r => r.parts.sort((a, b) => a.x - b.x).map(p => p.s).join(" ").replace(/\s+/g, " ").trim()).join("\n");
       if (text.replace(/\s/g, "").length < 25) {                   // a scanned page: read the picture
         const vp = page.getViewport({ scale: 2.2 }), c = document.createElement("canvas");
         c.width = vp.width; c.height = vp.height;
@@ -773,12 +868,25 @@ $("#itemsList").addEventListener("change", e => { if (e.target.classList.contain
 let newCatTarget = null;
 function askNewCategory(sel) {
   newCatTarget = sel; sel.dataset.prev = sel.dataset.prev || "";
+  const sheet = sel.id === "fSheet";
+  $("#newCatLabel").textContent = sheet ? "New ledger sheet name" : "New category name";
+  $("#newCatInput").placeholder = sheet ? "e.g. Home Essentials, SAITE, Wedding" : "e.g. Clothes, Hair, Church giving";
   $("#newCatRow").hidden = false; $("#newCatInput").value = ""; $("#newCatInput").focus();
 }
 function finishNewCategory(save) {
   const sel = newCatTarget; newCatTarget = null; $("#newCatRow").hidden = true;
   if (!sel) return;
   const name = $("#newCatInput").value.trim().replace(/\s+/g, " ").slice(0, 40);
+  if (sel.id === "fSheet") {
+    if (save && name) {
+      const existing = allSheets().find(x => x.toLowerCase() === name.toLowerCase());
+      const finalName = existing || name.replace(/[\[\]:*?\/\\]/g, " ").trim();
+      if (!existing) { const m = LS.get("customSheets", []); m.push(finalName); LS.set("customSheets", m); drive.dirty = true; saveLocal(); }
+      sel.innerHTML = sheetOptions(finalName); sel.value = finalName;
+      toast(existing ? `"${finalName}" is already a sheet.` : `Added the "${finalName}" sheet. It appears in your ledger when you save.`);
+    } else sel.value = sel.dataset.prev || "";
+    return;
+  }
   if (save && name) {
     const existing = allCategories().find(c => c.toLowerCase() === name.toLowerCase());
     const finalName = existing || name.charAt(0).toUpperCase() + name.slice(1);
@@ -798,6 +906,8 @@ $("#newCatAdd").addEventListener("click", () => finishNewCategory(true));
 $("#newCatCancel").addEventListener("click", () => finishNewCategory(false));
 $("#newCatInput").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); finishNewCategory(true); } if (e.key === "Escape") { e.stopPropagation(); finishNewCategory(false); } });
 $("#fCategory").addEventListener("focus", e => e.target.dataset.prev = e.target.value);
+$("#fSheet").addEventListener("focus", e => e.target.dataset.prev = e.target.value);
+$("#fSheet").addEventListener("change", e => { if (e.target.value === "__new__") askNewCategory(e.target); else e.target.dataset.prev = e.target.value; });
 $("#fCategory").addEventListener("change", e => { if (e.target.value === "__new__") askNewCategory(e.target); else e.target.dataset.prev = e.target.value; });
 document.addEventListener("focusin", e => { if (e.target.classList?.contains("icat")) e.target.dataset.prev = e.target.value; });
 ["#fTotal", "#fTax", "#fCurrency"].forEach(id => $(id).addEventListener("input", checkItems));
@@ -805,6 +915,7 @@ function fillForm(r) {
   setItems(r.items || []);
   $("#fItem").value = r.item || ""; $("#fMerchant").value = r.merchant || ""; $("#fDate").value = r.date || todayISO();
   $("#fCategory").innerHTML = catOptions(r.category || "Other"); $("#fCategory").value = r.category || "Other";
+  $("#fSheet").innerHTML = sheetOptions(r.sheet || ""); $("#fSheet").value = r.sheet || "";
   $("#newCatRow").hidden = true; newCatTarget = null;
   $("#fTotal").value = r.total != null ? Number(r.total).toFixed(2) : ""; $("#fTax").value = r.tax != null ? Number(r.tax).toFixed(2) : "";
   $("#fCurrency").value = r.currency || "CAD"; setKind(r.kind || "personal");
@@ -981,6 +1092,7 @@ $("#editForm").addEventListener("submit", async e => {
     ...(prev || {}), id: prev?.id || uid(),
     item: $("#fItem").value.trim(), items: readItems(), merchant, date: $("#fDate").value || todayISO(), total, tax: parseAmt($("#fTax").value),
     currency: $("#fCurrency").value, category: $("#fCategory").value === "__new__" ? "Other" : $("#fCategory").value, kind: form.kind,
+    sheet: $("#fSheet").value === "__new__" ? "" : $("#fSheet").value,
     hadPhoto: form.atts.length > 0, createdAt: prev?.createdAt || now, updatedAt: now,
     needsCheck: prev ? false : form.lowConf,
   };
@@ -1011,7 +1123,7 @@ function openDetail(id) {
   detailId = id; $("#delConfirm").hidden = true; $("#delBtn").hidden = false;
   $("#dTitle").textContent = r.item || r.merchant || "Receipt";
   const its = (r.items || []);
-  $("#slip").innerHTML = (its.length ? `<div class="itemlist">${its.map(i => `<span>${esc(i.name)}</span><span>${money(i.price, r.currency)}</span>`).join("")}</div>` : "") + `<dl>${r.item ? `<dt>Purchase</dt><dd>${esc(r.item)}</dd>` : ""}<dt>Store</dt><dd>${esc(r.merchant)}</dd><dt>Date</dt><dd>${esc(r.date)}</dd><dt>Category</dt><dd>${esc(r.category)}</dd>
+  $("#slip").innerHTML = (its.length ? `<div class="itemlist">${its.map(i => `<span>${esc(i.name)}</span><span>${money(i.price, r.currency)}</span>`).join("")}</div>` : "") + `<dl>${r.item ? `<dt>Purchase</dt><dd>${esc(r.item)}</dd>` : ""}<dt>Store</dt><dd>${esc(r.merchant)}</dd><dt>Date</dt><dd>${esc(r.date)}</dd><dt>Category</dt><dd>${esc(r.category)}</dd>${r.sheet ? `<dt>Ledger sheet</dt><dd>${esc(r.sheet)}</dd>` : ""}
     <dt>Type</dt><dd>${r.kind === "business" ? "Business" : "Personal"}</dd>
     <dt>Tax</dt><dd>${r.tax != null ? money(r.tax, r.currency) : "—"}</dd><dt class="total">Total</dt><dd class="total">${money(r.total, r.currency)}</dd></dl>
     ${attLinks(r)}`;

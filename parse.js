@@ -16,7 +16,12 @@
     [/london\s+drugs/i,"London Drugs","Shopping"],[/wal[\s*-]?mart/i,"Walmart","Shopping"],[/dollarama/i,"Dollarama","Shopping"],
     [/winners/i,"Winners","Shopping"],[/home\s?sense/i,"HomeSense","Home & utilities"],[/marshalls/i,"Marshalls","Shopping"],
     [/best\s?buy/i,"Best Buy","Shopping"],[/amazon|amzn/i,"Amazon","Shopping"],[/indigo|chapters/i,"Indigo","Shopping"],
-    [/lululemon/i,"Lululemon","Shopping"],[/\bh\s?&\s?m\b/i,"H&M","Shopping"],[/\bzara\b/i,"Zara","Shopping"],[/old\s?navy/i,"Old Navy","Shopping"],
+    [/lululemon/i,"Lululemon","Shopping"],[/dynamite/i,"Dynamite","Shopping"],[/\bgarage\b/i,"Garage","Shopping"],[/aritzia/i,"Aritzia","Shopping"],
+    [/torrid/i,"Torrid","Shopping"],[/\bbrowns\b/i,"Browns","Shopping"],[/ardene/i,"Ardene","Shopping"],[/urban\s+outfitters/i,"Urban Outfitters","Shopping"],
+    [/forever\s*21/i,"Forever 21","Shopping"],[/bath\s*&\s*body/i,"Bath & Body Works","Personal care"],[/victoria'?s\s+secret/i,"Victoria's Secret","Shopping"],
+    [/la\s+senza/i,"La Senza","Shopping"],[/reitmans/i,"Reitmans","Shopping"],[/\baldo\b/i,"Aldo","Shopping"],[/steve\s+madden/i,"Steve Madden","Shopping"],
+    [/foot\s?locker/i,"Foot Locker","Shopping"],[/\bnike\b/i,"Nike","Shopping"],[/adidas/i,"Adidas","Shopping"],[/\bgap\b/i,"Gap","Shopping"],
+    [/hudson'?s\s+bay|\bthe\s+bay\b/i,"Hudson's Bay","Shopping"],[/\bsaks\b/i,"Saks","Shopping"],[/nordstrom/i,"Nordstrom","Shopping"],[/\bsimons\b/i,"Simons","Shopping"],[/\bh\s?&\s?m\b/i,"H&M","Shopping"],[/\bzara\b/i,"Zara","Shopping"],[/old\s?navy/i,"Old Navy","Shopping"],
     [/sport\s?chek/i,"Sport Chek","Shopping"],[/canadian\s+tire/i,"Canadian Tire","Shopping"],[/simons/i,"Simons","Shopping"],
     [/sephora/i,"Sephora","Personal care"],[/\bulta\b/i,"Ulta","Personal care"],[/salon|barber|\bspa\b|nails?\b|beauty/i,null,"Personal care"],
     [/tim\s?horton/i,"Tim Hortons","Dining & coffee"],[/starbucks/i,"Starbucks","Dining & coffee"],[/mcdonald/i,"McDonald's","Dining & coffee"],
@@ -64,7 +69,7 @@
   // Money-looking numbers on a line: 12.34, 1,234.56, 12,34 (European), $ 12.34, 12.34-
   function amountsIn(line) {
     const out = [];
-    const re = /(-?)\$?\s?(\d{1,3}(?:[,\s]\d{3})+|\d+)\s?([.,])\s?(\d{2})(?!\d)(-?)/g;
+    const re = /(-?)\$?\s?(\d{1,3}(?:,\d{3})+|\d+)\s?([.,])\s?(\d{2})(?!\d)(-?)/g;
     let m;
     while ((m = re.exec(line))) {
       const whole = m[2].replace(/[,\s]/g, "");
@@ -170,7 +175,7 @@
   // ---------- line items ----------
   const STOP_RE = /sub\s*-?\s*total|subtot|\btotal\b|amount\s*due|balance\s*due/i;
   const NOT_ITEM_RE = /\b(g\.?s\.?t|h\.?s\.?t|p\.?s\.?t|q\.?s\.?t|tps|tvq|tax(es)?|change|cash|visa|mastercard|m\/c|amex|debit|interac|credit|tend(?:er|ered)?|balance|approved|auth(orization)?|card\s*#|acct|ref\s*#|trans(action)?|points|rewards|loyalty|optimum|airmiles|air\s+miles|you\s+saved|total\s+savings|items?\s+sold|tel\b|phone|fax|store\s*#|cashier|register|invoice|order\s*#|table\b|guests?|server)\b/i;
-  const DISCOUNT_RE = /saving|discount|coupon|promo|instant|rebate|\btpd\b|\boff\b|deal|reward\s+redeem/i;
+  const DISCOUNT_RE = /saving|discount|coupon|promo|instant|rebate|\btpd\b|\d\s*%?\s*off\b|\boff\s+\$?\d|deal|reward\s+redeem/i;
   const QTY_AT_RE = /^(\d+(?:\.\d+)?)\s*(?:x|@|ea\b|kg\s*@|lb\s*@|@\s*\$?)\s*/i;
 
   function cleanItemName(raw) {
@@ -199,7 +204,7 @@
     if (end < 0) end = lines.length;
     // Items start after the header block: first line that has a price and isn't the date/phone line.
     const items = [];
-    let pendingName = null;
+    let pendingName = null, lastAt = -9, lastOwnName = false;
     for (let i = 0; i < end; i++) {
       // "$12,008" / "$1,780": a price whose tax letter (J, D, H) was read as a digit -> "$12.00", "$1.78"
       const l = /\d{8,}/.test(lines[i]) ? lines[i].replace(/\$\s?(\d{1,3})[,.](\d{2})\d\b/g, "$$$1.$2") : lines[i];
@@ -219,10 +224,16 @@
       const nameLetters = (name.match(/[A-Za-z]/g) || []).length;
       const ownLine = /\d{8,}/.test(l) || /\$\s?\d/.test(l);          // barcode or $-price: this line is an item by itself
       const priceOnly = /^\d+(\.\d+)?\s*(@|x)\s*\$?\d/i.test(l) || QTY_AT_RE.test(name) || /^\W{0,3}\d{5,7}\s/.test(l) || nameLetters < 3 || (pendingName && nameLetters <= 4 && amts.length >= 2);
+      const last = items[items.length - 1];
+      const bareAmount = letters < 3 && !/\d{5,}/.test(l);
+      // The line amount repeated under a size/colour line (Dynamite, Gap...): the item already has this price.
+      if (bareAmount && last && Math.abs(last.price - price) < 0.005 && i - lastAt <= 3) { pendingName = null; continue; }
+      let ownName = false;
       if (pendingName && priceOnly && !/\d{8,}/.test(l)) { name = cleanItemName(pendingName).name; }
-      else if (priceOnly && !ownLine && items.length && !pendingName) { items[items.length - 1].price = price; continue; }   // price continued on the next line
+      else if (priceOnly && !ownLine && last && !pendingName && lastAt === i - 1 && lastOwnName) { last.price = price; pendingName = null; continue; }   // price continued on the next line
       else if (nameLetters < 3 || !/[A-Z]{2,}|\b[A-Z][a-z]{2,}|\b[a-z]{4,}/.test(name)) name = "Unreadable item";
-      pendingName = null;
+      else ownName = true;
+      pendingName = null; lastAt = i; lastOwnName = ownName;
       name = name.replace(QTY_AT_RE, "").replace(/^\$?\d+[.,]\d{2}\s*/, "").trim() || "Unreadable item";
       const isDiscount = price < 0 || DISCOUNT_RE.test(name);
       items.push({ name: (qty > 1 ? `${name} ×${qty}` : name), price: isDiscount ? -Math.abs(price) : price });
@@ -253,6 +264,14 @@
     const pick = named || generic;
     if (pick) { category = pick.cat; kind = pick.kind; }
     if (named) merchant = named.name;
+    // A store we don't know: its website on the receipt usually gives the name (www.dynamiteclothing.com -> Dynamite).
+    if (!merchant) {
+      const w = joined.match(/\b(?:www\.)?([a-z0-9-]{3,30})\.(?:com|ca|co\.uk|net)\b/i);
+      if (w && !/gmail|hotmail|outlook|yahoo|survey|facebook|instagram|twitter|google/i.test(w[1])) {
+        const core = w[1].replace(/(clothing|online|shop|store|stores|canada|inc)$/i, "").replace(/-/g, " ");
+        if (core.length >= 3) merchant = core.charAt(0).toUpperCase() + core.slice(1);
+      }
+    }
     if (!merchant) merchant = titleCase(findMerchantLine(lines));
 
     const learned = opts.learned || {};

@@ -93,7 +93,7 @@
       <a class="btn primary" id="ledgerLink" href="#" target="_blank" rel="noopener" hidden>Open ledger</a>
       <button type="button" id="exportBtn" hidden>Download CSV</button>
     </div>
-    <p>The ledger is a Google Sheet with every purchase, its cost and tax, a grand total, and totals by category and by personal or business. It updates every time you save.</p>
+    <p>The ledger is a Google Sheet. The "All receipts" tab has every purchase with yearly totals by category, type and sheet, and each ledger sheet you make (like Home Essentials) gets its own tab. It updates every time you save.</p>
     <div class="sync"><span class="dot" id="syncDot"></span><span id="syncMsg">Not connected yet.</span><button type="button" class="ghost" id="syncBtn" hidden>Sync now</button></div>
   </section>
 
@@ -132,8 +132,9 @@
       <div class="field full"><label for="fMerchant">Store or vendor</label><input id="fMerchant" required autocomplete="off"></div>
       <div class="field"><label for="fDate">Date</label><input id="fDate" type="date" required></div>
       <div class="field"><label for="fCategory">Category</label><select id="fCategory"></select></div>
+      <div class="field full"><label for="fSheet">Ledger sheet</label><select id="fSheet"></select></div>
       <div class="field full newcat" id="newCatRow" hidden>
-        <label for="newCatInput">New category name</label>
+        <label for="newCatInput" id="newCatLabel">New category name</label>
         <div class="newcat-row"><input id="newCatInput" placeholder="e.g. Clothes, Hair, Church giving" autocomplete="off" maxlength="40"><button type="button" class="primary" id="newCatAdd">Add</button><button type="button" class="ghost" id="newCatCancel">Cancel</button></div>
       </div>
       <div class="field"><label for="fTotal">Cost (total paid)</label><input id="fTotal" inputmode="decimal" class="num" required placeholder="0.00"></div>
