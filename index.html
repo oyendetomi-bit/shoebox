@@ -63,7 +63,8 @@
     <span style="display:flex;gap:8px"><button type="button" class="primary" id="installBtn" hidden>Install</button><button type="button" class="ghost" id="installDismiss">Not now</button></span>
   </div>
 
-  <section class="summary" aria-label="This month">
+  <section class="summary" aria-label="Your spending">
+    <div class="tile wide"><h2 id="yLabel">Spent this year</h2><div class="big num" id="yTotal">$0.00</div><small id="yCount">No receipts yet this year</small></div>
     <div class="tile"><h2 id="mLabel">This month</h2><div class="big num" id="mTotal">$0.00</div><small id="mCount">No receipts yet</small></div>
     <div class="tile"><h2>Business this year</h2><div class="big num" id="bizTotal">$0.00</div><small id="bizCount">Tagged as business</small></div>
     <div class="bars" id="bars" hidden></div>
@@ -115,11 +116,15 @@
       <div class="field full"><label for="fItem">Short description</label><input id="fItem" placeholder="e.g. Weekly groceries, printer ink" autocomplete="off"></div>
       <div class="field full"><span class="lbl">Items on the receipt</span>
         <div class="items" id="itemsList"></div>
-        <div class="items-foot"><button type="button" class="chip" id="addItemBtn">+ Add item</button><span class="small" id="itemsCheck"></span></div>
+        <div class="items-foot"><span style="display:flex;gap:6px;flex-wrap:wrap"><button type="button" class="chip" id="addItemBtn">+ Add item</button><button type="button" class="chip" id="addDiscountBtn">− Add discount</button></span><span class="small" id="itemsCheck"></span></div>
       </div>
       <div class="field full"><label for="fMerchant">Store or vendor</label><input id="fMerchant" required autocomplete="off"></div>
       <div class="field"><label for="fDate">Date</label><input id="fDate" type="date" required></div>
       <div class="field"><label for="fCategory">Category</label><select id="fCategory"></select></div>
+      <div class="field full newcat" id="newCatRow" hidden>
+        <label for="newCatInput">New category name</label>
+        <div class="newcat-row"><input id="newCatInput" placeholder="e.g. Clothes, Hair, Church giving" autocomplete="off" maxlength="40"><button type="button" class="primary" id="newCatAdd">Add</button><button type="button" class="ghost" id="newCatCancel">Cancel</button></div>
+      </div>
       <div class="field"><label for="fTotal">Cost (total paid)</label><input id="fTotal" inputmode="decimal" class="num" required placeholder="0.00"></div>
       <div class="field"><label for="fTax">GST/HST/tax</label><input id="fTax" inputmode="decimal" class="num" placeholder="0.00"></div>
       <div class="field"><label for="fCurrency">Currency</label><select id="fCurrency"><option>CAD</option><option>USD</option><option>EUR</option><option>GBP</option><option>NGN</option><option>MXN</option></select></div>

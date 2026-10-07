@@ -13,7 +13,7 @@ const SCOPE = "https://www.googleapis.com/auth/drive.file";
 const DAPI = "https://www.googleapis.com/drive/v3", UAPI = "https://www.googleapis.com/upload/drive/v3";
 const FOLDER = "application/vnd.google-apps.folder", SHEET = "application/vnd.google-apps.spreadsheet";
 const RECENT = 5;
-const APP_VERSION = "Version 5 · item-by-item ledger";
+const APP_VERSION = "Version 6 · yearly totals, your own categories";
 const { parseReceipt, CATEGORIES } = window.ShoeboxParse;
 const $ = s => document.querySelector(s);
 
@@ -159,41 +159,89 @@ async function ensureFolder(cat) {
   return f.id;
 }
 
+// ---------- categories: built-in + your own ----------
+function allCategories() {
+  const mine = new Set(LS.get("customCats", []));
+  receipts.forEach(r => { if (!r.deleted) { mine.add(r.category); (r.items || []).forEach(i => i.category && mine.add(i.category)); } });
+  CATEGORIES.forEach(c => mine.delete(c)); mine.delete(undefined); mine.delete("");
+  const base = CATEGORIES.filter(c => c !== "Other");
+  return [...base, ...[...mine].sort((a, b) => a.localeCompare(b)), "Other"];
+}
+function catOptions(selected, { same = false } = {}) {
+  const cats = allCategories();
+  if (selected && !cats.includes(selected)) cats.splice(cats.length - 1, 0, selected);
+  return (same ? `<option value="">Same as receipt</option>` : "") +
+    cats.map(c => `<option${c === selected ? " selected" : ""}>${esc(c)}</option>`).join("") +
+    `<option value="__new__">＋ New category…</option>`;
+}
+
 // ---------- ledger ----------
 // One row per item. Tax gets its own row, and any gap between the items and the total
 // becomes an "other charges" or "discounts" row, so every receipt adds up to what you paid.
+// One row per item. Tax gets its own row (split across the item categories in proportion), and any gap
+// between the items and the total becomes an "other charges" or "discounts" row, so every receipt adds up to what you paid.
 function lineRows(r) {
-  const total = r.total ?? 0, tax = r.tax ?? 0;
+  const total = r.total ?? 0, tax = r.tax ?? 0, rc = r.category || "Other";
   const items = (r.items || []).filter(i => i && i.name && i.price != null && isFinite(i.price));
-  const rows = items.length ? items.map(i => ({ item: i.name, price: i.price, tax: null }))
-                            : [{ item: r.item || "Purchase", price: Math.round((total - tax) * 100) / 100, tax: null }];
+  // A discount with no category of its own comes off the receipt's biggest item category.
+  const spend = {}; items.forEach(i => { if (i.price > 0) { const c = i.category || rc; spend[c] = (spend[c] || 0) + i.price; } });
+  const mainCat = Object.keys(spend).sort((a, b) => spend[b] - spend[a])[0] || rc;
+  const rows = items.length ? items.map(i => ({ item: i.name, price: i.price, tax: null, cat: i.category || (i.price < 0 ? mainCat : rc) }))
+                            : [{ item: r.item || "Purchase", price: Math.round((total - tax) * 100) / 100, tax: null, cat: rc }];
   const diff = Math.round((total - tax - rows.reduce((a, x) => a + x.price, 0)) * 100) / 100;
-  if (items.length && Math.abs(diff) >= 0.01) rows.push({ item: diff > 0 ? "Other charges (not itemized)" : "Discounts / adjustments", price: diff, tax: null });
-  if (tax) rows.push({ item: "Tax (GST/HST)", price: null, tax });
+  if (items.length && Math.abs(diff) >= 0.01) rows.push({ item: diff > 0 ? "Other charges (not itemized)" : "Discounts / adjustments", price: diff, tax: null, cat: rc });
+  if (tax) {
+    const byCat = {};
+    rows.forEach(x => { if (x.price > 0) byCat[x.cat] = (byCat[x.cat] || 0) + x.price; });
+    const cats = Object.keys(byCat), base = cats.reduce((a, c) => a + byCat[c], 0);
+    if (cats.length <= 1 || base <= 0) rows.push({ item: "Tax (GST/HST)", price: null, tax, cat: cats[0] || rc });
+    else {
+      let left = Math.round(tax * 100);
+      const parts = cats.map(c => ({ c, cents: Math.floor(Math.round(tax * 100) * byCat[c] / base) }));
+      parts.forEach(pt => left -= pt.cents);
+      parts.sort((a, b) => byCat[b.c] - byCat[a.c])[0].cents += left;
+      parts.forEach(pt => pt.cents && rows.push({ item: `Tax (GST/HST) on ${pt.c}`, price: null, tax: pt.cents / 100, cat: pt.c }));
+    }
+  }
   return rows;
+}
+// Totals per category (items + their tax) for a set of receipts.
+function categoryTotals(rs) {
+  const t = {};
+  rs.forEach(r => lineRows(r).forEach(x => { t[x.cat] = (t[x.cat] || 0) + (x.price || 0) + (x.tax || 0); }));
+  Object.keys(t).forEach(k => { t[k] = Math.round(t[k] * 100) / 100; if (!t[k]) delete t[k]; });
+  return Object.entries(t).sort((a, b) => b[1] - a[1]);
 }
 function ledgerCSV(receiptsSorted) {
   const q = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
-  const out = [["Date", "Item", "Store", "Category", "Type", "Price", "Tax", "Currency", "Receipt total", "Receipt #", "Photo"]];
+  const blank = n => Array(n).fill("");
+  const out = [["Date", "Item", "Store", "Category", "Type", "Price", "Tax", "Currency", "Receipt total", "Receipt #", "Photo", "Year"]];
   receiptsSorted.forEach((r, ri) => {
-    lineRows(r).forEach((x, i) => out.push([r.date, x.item, r.merchant, r.category, r.kind === "business" ? "Business" : "Personal",
+    lineRows(r).forEach((x, i) => out.push([r.date, x.item, r.merchant, x.cat, r.kind === "business" ? "Business" : "Personal",
       x.price != null ? x.price.toFixed(2) : "", x.tax != null ? x.tax.toFixed(2) : "", r.currency,
       i === 0 ? (r.total ?? 0).toFixed(2) : "", `#${ri + 1}`,
-      i === 0 && r.photoUrl ? `=HYPERLINK("${r.photoUrl}","View photo")` : ""]));
+      i === 0 && r.photoUrl ? `=HYPERLINK("${r.photoUrl}","View photo")` : "", (r.date || "").slice(0, 4)]));
   });
-  const n = Math.max(out.length, 2), F = `$F$2:$F$${n}`, G = `$G$2:$G$${n}`, D = `$D$2:$D$${n}`, E = `$E$2:$E$${n}`, J = `$J$2:$J$${n}`;
+  const n = Math.max(out.length, 2), R = c => `$${c}$2:$${c}$${n}`;
+  const F = R("F"), G = R("G"), D = R("D"), E = R("E"), J = R("J"), L = R("L");
   const mixed = new Set(receiptsSorted.map(r => r.currency)).size > 1;
-  out.push([]);
-  out.push(["ITEMS SUBTOTAL", "", "", "", "", `=SUM(${F})`, "", "", "", "", ""]);
-  out.push(["TAX", "", "", "", "", "", `=SUM(${G})`, "", "", "", ""]);
-  out.push([mixed ? "TOTAL SPENT (all currencies)" : "TOTAL SPENT", "", "", "", "", `=SUM(${F})+SUM(${G})`, "", "", "", `=COUNTUNIQUE(${J})&" receipts"`, ""]);
-  out.push([]);
-  out.push(["BY CATEGORY", "", "", "", "", "Items", "Tax", "", "Total", "Receipts", ""]);
-  CATEGORIES.filter(c => receiptsSorted.some(r => r.category === c)).forEach(c =>
-    out.push([c, "", "", "", "", `=SUMIF(${D},"${c}",${F})`, `=SUMIF(${D},"${c}",${G})`, "", `=SUMIF(${D},"${c}",${F})+SUMIF(${D},"${c}",${G})`, `=COUNTUNIQUEIFS(${J},${D},"${c}")`, ""]));
-  out.push([]);
-  out.push(["BY TYPE", "", "", "", "", "Items", "Tax", "", "Total", "Receipts", ""]);
-  ["Personal", "Business"].forEach(k => out.push([k, "", "", "", "", `=SUMIF(${E},"${k}",${F})`, `=SUMIF(${E},"${k}",${G})`, "", `=SUMIF(${E},"${k}",${F})+SUMIF(${E},"${k}",${G})`, `=COUNTUNIQUEIFS(${J},${E},"${k}")`, ""]));
+  const years = [...new Set(receiptsSorted.map(r => (r.date || "").slice(0, 4)).filter(Boolean))].sort().reverse();
+  const cats = allCategories().filter(c => receiptsSorted.some(r => lineRows(r).some(x => x.cat === c)));
+  for (const y of years) {
+    const yc = `${L},"${y}"`;
+    out.push([]);
+    out.push([`${y} TOTAL SPENT${mixed ? " (all currencies)" : ""}`, ...blank(4), `=SUMIFS(${F},${yc})+SUMIFS(${G},${yc})`, "", "", "", `=COUNTUNIQUEIFS(${J},${yc})&" receipts"`, "", ""]);
+    out.push([`${y} BY CATEGORY`, ...blank(4), "Items", "Tax", "", "Total", "Receipts", "", ""]);
+    cats.filter(c => receiptsSorted.some(r => (r.date || "").startsWith(y) && lineRows(r).some(x => x.cat === c))).forEach(c => out.push([c, ...blank(4), `=SUMIFS(${F},${yc},${D},"${c}")`, `=SUMIFS(${G},${yc},${D},"${c}")`, "",
+      `=SUMIFS(${F},${yc},${D},"${c}")+SUMIFS(${G},${yc},${D},"${c}")`, `=COUNTUNIQUEIFS(${J},${yc},${D},"${c}")`, "", ""]));
+    out.push([`${y} BY TYPE`, ...blank(4), "Items", "Tax", "", "Total", "Receipts", "", ""]);
+    ["Personal", "Business"].forEach(k => out.push([k, ...blank(4), `=SUMIFS(${F},${yc},${E},"${k}")`, `=SUMIFS(${G},${yc},${E},"${k}")`, "",
+      `=SUMIFS(${F},${yc},${E},"${k}")+SUMIFS(${G},${yc},${E},"${k}")`, `=COUNTUNIQUEIFS(${J},${yc},${E},"${k}")`, "", ""]));
+  }
+  if (years.length > 1) {
+    out.push([]);
+    out.push([`ALL YEARS TOTAL SPENT${mixed ? " (all currencies)" : ""}`, ...blank(4), `=SUM(${F})+SUM(${G})`, "", "", "", `=COUNTUNIQUE(${J})&" receipts"`, "", ""]);
+  }
   return out.map(r => r.map(q).join(",")).join("\n");
 }
 async function writeLedger() {
@@ -286,7 +334,7 @@ async function backfillItems() {
       if (!res.ok) { Object.assign(r, { items: [], updatedAt: Date.now() }); saveLocal(); continue; }
       const prepared = await prepare(await res.blob());
       const { data } = await (await getWorker()).recognize(prepared.ocrCanvas);
-      const p = parseReceipt(data.text, { today: todayISO(), learned: learnedMap(), confidence: data.confidence });
+      const p = parseReceipt(data.text, { today: todayISO(), learned: learnedMap(), confidence: data.confidence, categories: allCategories() });
       const cur = receipts.find(x => x.id === r.id);
       if (!cur || cur.deleted || cur.items !== undefined) continue;
       const itemSum = p.items.reduce((a, i) => a + i.price, 0);
@@ -384,7 +432,6 @@ $("#installBtn").addEventListener("click", async () => { if (!installEvt) return
 $("#installDismiss").addEventListener("click", () => { LS.set("installDismissed", true); $("#installBar").hidden = true; });
 
 // ---------- render ----------
-$("#fCategory").innerHTML = CATEGORIES.map(c => `<option>${esc(c)}</option>`).join("");
 function render() {
   const all = live();
   const nowM = todayISO().slice(0, 7), year = nowM.slice(0, 4);
@@ -402,10 +449,14 @@ function render() {
   const biz = all.filter(r => r.kind === "business" && (r.date || "").startsWith(year) && r.currency === "CAD");
   $("#bizTotal").textContent = money(biz.reduce((a, r) => a + (r.total || 0), 0));
   $("#bizCount").textContent = `${biz.length} business receipt${biz.length === 1 ? "" : "s"} in ${year}`;
-  const byCat = {}; cadM.forEach(r => byCat[r.category] = (byCat[r.category] || 0) + (r.total || 0));
-  const top = Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, 4), mx = top[0]?.[1] || 1;
-  $("#bars").innerHTML = top.length ? `<h2>Top categories this month</h2>` + top.map(([c, v]) => `<div class="bar"><span>${esc(c)}</span><span class="track"><i style="width:${Math.max(4, v / mx * 100)}%"></i></span><span class="num">${money(v)}</span></div>`).join("") : "";
-  $("#bars").hidden = !top.length;
+  const thisY = all.filter(r => (r.date || "").startsWith(year)), cadY = thisY.filter(r => r.currency === "CAD");
+  $("#yLabel").textContent = `Spent in ${year}`;
+  $("#yTotal").textContent = money(cadY.reduce((a, r) => a + (r.total || 0), 0));
+  const otherY = thisY.length - cadY.length;
+  $("#yCount").textContent = thisY.length ? `${thisY.length} receipt${thisY.length > 1 ? "s" : ""}${otherY ? ` · ${otherY} in other currencies not included` : ""}` : "No receipts yet this year";
+  const cats = categoryTotals(cadY), mx = cats[0]?.[1] || 1;
+  $("#bars").innerHTML = cats.length ? `<h2>${year} by category</h2>` + cats.map(([c, v]) => `<div class="bar"><span>${esc(c)}</span><span class="track"><i style="width:${Math.max(3, Math.max(0, v) / mx * 100)}%"></i></span><span class="num">${money(v)}</span></div>`).join("") : "";
+  $("#bars").hidden = !cats.length;
   $("#exportBtn").hidden = !all.length;
   $("#folderLink").hidden = !drive.rootUrl; if (drive.rootUrl) $("#folderLink").href = drive.rootUrl;
   $("#ledgerLink").hidden = !drive.ledgerUrl; if (drive.ledgerUrl) $("#ledgerLink").href = drive.ledgerUrl;
@@ -497,16 +548,25 @@ function setKind(v) { form.kind = v; document.querySelectorAll("#fKind button").
 document.querySelectorAll("#fKind button").forEach(b => b.addEventListener("click", () => setKind(b.dataset.v)));
 function itemRow(it = {}) {
   const d = document.createElement("div"); d.className = "irow";
-  d.innerHTML = `<input class="iname" placeholder="Item" autocomplete="off" aria-label="Item name"><input class="iprice num" inputmode="decimal" placeholder="0.00" aria-label="Item price"><button type="button" class="iremove ghost" aria-label="Remove item">×</button>`;
+  d.innerHTML = `<input class="iname" placeholder="Item" autocomplete="off" aria-label="Item name">
+    <span class="iprice-wrap"><button type="button" class="isign" aria-label="Make this a discount (switch plus or minus)">±</button><input class="iprice num" inputmode="decimal" placeholder="0.00" aria-label="Item price"></span>
+    <button type="button" class="iremove ghost" aria-label="Remove item">×</button>
+    <select class="icat" aria-label="Item category">${catOptions(it.category || "", { same: true })}</select>`;
   d.querySelector(".iname").value = it.name || "";
   d.querySelector(".iprice").value = it.price != null ? Number(it.price).toFixed(2) : "";
+  d.querySelector(".icat").value = it.category || "";
+  markSign(d);
   $("#itemsList").appendChild(d);
   return d;
 }
+function markSign(d) { const v = parseAmt(d.querySelector(".iprice").value); d.classList.toggle("neg", v != null && v < 0); }
 function setItems(items) { $("#itemsList").innerHTML = ""; (items || []).forEach(itemRow); checkItems(); }
 function readItems() {
-  return [...document.querySelectorAll("#itemsList .irow")].map(d => ({ name: d.querySelector(".iname").value.trim(), price: parseAmt(d.querySelector(".iprice").value) }))
-    .filter(i => i.name && i.price != null);
+  return [...document.querySelectorAll("#itemsList .irow")].map(d => {
+    const it = { name: d.querySelector(".iname").value.trim(), price: parseAmt(d.querySelector(".iprice").value) };
+    const c = d.querySelector(".icat").value; if (c && c !== "__new__") it.category = c;
+    return it;
+  }).filter(i => i.name && i.price != null);
 }
 function checkItems() {
   const items = readItems(), el = $("#itemsCheck");
@@ -519,13 +579,55 @@ function checkItems() {
   el.classList.toggle("off", Math.abs(diff) >= 0.01);
 }
 $("#addItemBtn").addEventListener("click", () => { itemRow().querySelector(".iname").focus(); checkItems(); });
-$("#itemsList").addEventListener("click", e => { const b = e.target.closest(".iremove"); if (b) { b.closest(".irow").remove(); checkItems(); } });
-$("#itemsList").addEventListener("input", checkItems);
+$("#addDiscountBtn").addEventListener("click", () => { const d = itemRow({ name: "Discount" }); d.querySelector(".iprice").value = "-"; d.querySelector(".iprice").focus(); markSign(d); checkItems(); });
+$("#itemsList").addEventListener("click", e => {
+  const b = e.target.closest(".iremove"); if (b) { b.closest(".irow").remove(); checkItems(); return; }
+  const sg = e.target.closest(".isign");
+  if (sg) {
+    const row = sg.closest(".irow"), inp = row.querySelector(".iprice"), v = inp.value.trim();
+    inp.value = v.startsWith("-") ? v.slice(1) : "-" + v;
+    markSign(row); checkItems(); inp.focus();
+  }
+});
+$("#itemsList").addEventListener("input", e => { const row = e.target.closest(".irow"); if (row) markSign(row); checkItems(); });
+$("#itemsList").addEventListener("change", e => { if (e.target.classList.contains("icat") && e.target.value === "__new__") askNewCategory(e.target); });
+// New category: an inline text box (no pop-ups), then the new name appears in every category list.
+let newCatTarget = null;
+function askNewCategory(sel) {
+  newCatTarget = sel; sel.dataset.prev = sel.dataset.prev || "";
+  $("#newCatRow").hidden = false; $("#newCatInput").value = ""; $("#newCatInput").focus();
+}
+function finishNewCategory(save) {
+  const sel = newCatTarget; newCatTarget = null; $("#newCatRow").hidden = true;
+  if (!sel) return;
+  const name = $("#newCatInput").value.trim().replace(/\s+/g, " ").slice(0, 40);
+  if (save && name) {
+    const existing = allCategories().find(c => c.toLowerCase() === name.toLowerCase());
+    const finalName = existing || name.charAt(0).toUpperCase() + name.slice(1);
+    if (!existing) { const mine = LS.get("customCats", []); mine.push(finalName); LS.set("customCats", mine); }
+    refreshCategorySelects();
+    sel.value = finalName;
+    toast(existing ? `"${finalName}" is already a category.` : `Added "${finalName}".`);
+  } else sel.value = sel.dataset.prev || (sel.id === "fCategory" ? "Other" : "");
+  checkItems();
+}
+function refreshCategorySelects() {
+  const f = $("#fCategory"), keep = f.value;
+  f.innerHTML = catOptions(keep === "__new__" ? "" : keep); if (keep !== "__new__") f.value = keep;
+  document.querySelectorAll("#itemsList .icat").forEach(sel => { const v = sel.value; sel.innerHTML = catOptions(v === "__new__" ? "" : v, { same: true }); if (v !== "__new__") sel.value = v; });
+}
+$("#newCatAdd").addEventListener("click", () => finishNewCategory(true));
+$("#newCatCancel").addEventListener("click", () => finishNewCategory(false));
+$("#newCatInput").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); finishNewCategory(true); } if (e.key === "Escape") { e.stopPropagation(); finishNewCategory(false); } });
+$("#fCategory").addEventListener("focus", e => e.target.dataset.prev = e.target.value);
+$("#fCategory").addEventListener("change", e => { if (e.target.value === "__new__") askNewCategory(e.target); else e.target.dataset.prev = e.target.value; });
+document.addEventListener("focusin", e => { if (e.target.classList?.contains("icat")) e.target.dataset.prev = e.target.value; });
 ["#fTotal", "#fTax", "#fCurrency"].forEach(id => $(id).addEventListener("input", checkItems));
 function fillForm(r) {
   setItems(r.items || []);
   $("#fItem").value = r.item || ""; $("#fMerchant").value = r.merchant || ""; $("#fDate").value = r.date || todayISO();
-  $("#fCategory").value = CATEGORIES.includes(r.category) ? r.category : "Other";
+  $("#fCategory").innerHTML = catOptions(r.category || "Other"); $("#fCategory").value = r.category || "Other";
+  $("#newCatRow").hidden = true; newCatTarget = null;
   $("#fTotal").value = r.total != null ? Number(r.total).toFixed(2) : ""; $("#fTax").value = r.tax != null ? Number(r.tax).toFixed(2) : "";
   $("#fCurrency").value = r.currency || "CAD"; setKind(r.kind || "personal");
   checkItems();
@@ -570,7 +672,7 @@ async function onPhoto(file, reread = false) {
     const w = await getWorker();
     const { data } = await w.recognize(prepared.ocrCanvas);
     if (form.readTok !== tok || $("#editSheet").hidden) return;
-    const r = parseReceipt(data.text, { today: todayISO(), learned: learnedMap(), confidence: data.confidence });
+    const r = parseReceipt(data.text, { today: todayISO(), learned: learnedMap(), confidence: data.confidence, categories: allCategories() });
     form.ocrText = data.text;
     $("#ocrText").textContent = data.text.trim() || "(no text found)"; $("#ocrDetails").hidden = false;
     if (reread) {
@@ -618,7 +720,7 @@ $("#editForm").addEventListener("submit", async e => {
   const r = {
     ...(prev || {}), id: prev?.id || uid(),
     item: $("#fItem").value.trim(), items: readItems(), merchant, date: $("#fDate").value || todayISO(), total, tax: parseAmt($("#fTax").value),
-    currency: $("#fCurrency").value, category: $("#fCategory").value, kind: form.kind,
+    currency: $("#fCurrency").value, category: $("#fCategory").value === "__new__" ? "Other" : $("#fCategory").value, kind: form.kind,
     hadPhoto: !!(photo || prev?.hadPhoto), createdAt: prev?.createdAt || now, updatedAt: now,
     needsCheck: prev ? false : form.lowConf,
   };
@@ -665,14 +767,15 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") { if (!$("#e
 $("#exportBtn").addEventListener("click", () => {
   const rs = live().slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
   const q = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
-  let sp = 0, st = 0;
-  const lines = [];
-  rs.forEach((r, ri) => lineRows(r).forEach(x => { sp += x.price || 0; st += x.tax || 0;
-    lines.push([r.date, x.item, r.merchant, r.category, r.kind === "business" ? "Business" : "Personal", x.price != null ? x.price.toFixed(2) : "", x.tax != null ? x.tax.toFixed(2) : "", r.currency, `#${ri + 1}`].map(q).join(",")); }));
-  const csv = ["Date,Item,Store,Category,Type,Price,Tax,Currency,Receipt #", ...lines, "",
-    ["ITEMS SUBTOTAL", "", "", "", "", sp.toFixed(2), "", "", ""].map(q).join(","),
-    ["TAX", "", "", "", "", "", st.toFixed(2), "", ""].map(q).join(","),
-    ["TOTAL SPENT", "", "", "", "", (sp + st).toFixed(2), "", "", `${rs.length} receipts`].map(q).join(",")].join("\n");
+  const lines = [], byYear = {};
+  rs.forEach((r, ri) => lineRows(r).forEach(x => {
+    const y = (r.date || "").slice(0, 4); byYear[y] = (byYear[y] || 0) + (x.price || 0) + (x.tax || 0);
+    lines.push([r.date, x.item, r.merchant, x.cat, r.kind === "business" ? "Business" : "Personal", x.price != null ? x.price.toFixed(2) : "", x.tax != null ? x.tax.toFixed(2) : "", r.currency, `#${ri + 1}`].map(q).join(","));
+  }));
+  const yearLines = Object.keys(byYear).sort().reverse().flatMap(y => [
+    ["", `${y} TOTAL SPENT`, "", "", "", byYear[y].toFixed(2), "", "", ""].map(q).join(","),
+    ...categoryTotals(rs.filter(r => (r.date || "").startsWith(y))).map(([c, v]) => ["", `${y} · ${c}`, "", c, "", v.toFixed(2), "", "", ""].map(q).join(","))]);
+  const csv = ["Date,Item,Store,Category,Type,Price,Tax,Currency,Receipt #", ...lines, "", ...yearLines].join("\n");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
   a.download = `shoebox-receipts-${todayISO()}.csv`;

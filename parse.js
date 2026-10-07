@@ -262,7 +262,7 @@
     const { total, how } = findTotal(lines);
     const tax = findTax(lines, total);
     const date = findDate(joined, today);
-    if (!CATEGORIES.includes(category)) category = "Other";
+    if (!(opts.categories || CATEGORIES).includes(category)) category = "Other";
     if (!kind) kind = BUSINESS_CATS.has(category) ? "business" : "personal";
 
     const weak = how !== "total" || !merchant || !date || (opts.confidence != null && opts.confidence < 55);
