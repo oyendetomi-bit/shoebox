@@ -13,7 +13,7 @@ const SCOPE = "https://www.googleapis.com/auth/drive.file";
 const DAPI = "https://www.googleapis.com/drive/v3", UAPI = "https://www.googleapis.com/upload/drive/v3";
 const FOLDER = "application/vnd.google-apps.folder", SHEET = "application/vnd.google-apps.spreadsheet";
 const RECENT = 5;
-const APP_VERSION = "Version 7 · long receipts and files";
+const APP_VERSION = "Version 8 · PDF reading fixed";
 const { parseReceipt, CATEGORIES } = window.ShoeboxParse;
 const $ = s => document.querySelector(s);
 
@@ -609,7 +609,15 @@ function findReceipt(c) {
 async function textFrom(blob, type, onPage) {
   if (isPdf(type)) {
     const pdfjs = await loadPdfJs();
-    const doc = await pdfjs.getDocument({ data: await blob.arrayBuffer() }).promise;
+    const buf = new Uint8Array(await blob.arrayBuffer());
+    let doc;
+    try { doc = await pdfjs.getDocument({ data: buf, isEvalSupported: false }).promise; }
+    catch (e) {
+      if (e?.name === "PasswordException") throw new Error("this PDF is password-protected");
+      // Some phones can't start the background reader; read on the main thread instead.
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
+      doc = await pdfjs.getDocument({ data: buf, isEvalSupported: false, disableWorker: true }).promise;
+    }
     const out = [];
     for (let n = 1; n <= Math.min(doc.numPages, 12); n++) {
       onPage && onPage(n, doc.numPages);
@@ -636,8 +644,13 @@ let pdfP = null;
 function loadPdfJs() {
   if (!pdfP) pdfP = new Promise((res, rej) => {
     const s = document.createElement("script");
-    s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
-    s.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"; res(window.pdfjsLib); };
+    // The PDF reader ships with the app (same site), which iPhones need for its background worker.
+    s.src = "vendor/pdf.min.js";
+    s.onload = () => {
+      if (!window.pdfjsLib) { pdfP = null; rej(new Error("PDF reader didn't start")); return; }
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
+      res(window.pdfjsLib);
+    };
     s.onerror = () => { pdfP = null; rej(new Error("PDF reader didn't load")); };
     document.head.appendChild(s);
   });
@@ -835,11 +848,11 @@ async function addFiles(fileList) {
     let type = f.type || "application/octet-stream", blob = f;
     if (isImage(type) && !/svg/.test(type)) {
       try { blob = (await prepare(f)).photo; type = "image/jpeg"; } catch { /* keep the original if it can't be decoded here */ }
-    } else if (!f.type && /\.pdf$/i.test(f.name)) type = "application/pdf";
+    } else if (/\.pdf$/i.test(f.name) || /pdf/i.test(f.type)) type = "application/pdf";
     form.atts.push({ key: uid(), type, origName: f.name, blob, preview: URL.createObjectURL(blob), pending: true });
   }
   renderAtts();
-  if (files.some(f => isImage(f.type) || isPdf(f.type) || /\.pdf$/i.test(f.name))) readAll(false);
+  if (form.atts.some(readable)) readAll(false);
   else readMsg(`Attached ${files.length === 1 ? `"${files[0].name}"` : `${files.length} files`}. Fill in the details below.`, false, null);
 }
 // Read every photo/PDF on this receipt in order, as one receipt.
@@ -894,8 +907,11 @@ async function readAll(refetch) {
       : !r.confident ? "Some parts were hard to read. Please double-check the store, date and total."
       : r.items.length ? `Done. Found ${r.items.length} item${r.items.length > 1 ? "s" : ""}${parts}${unread ? `; ${unread} name${unread > 1 ? "s were" : " was"} too faint to read, so rename those` : ""}. Check them and save.`
       : "Done. No item lines found; add them below if you like.", false, null);
-  } catch {
-    if (form.readTok === tok) readMsg(navigator.onLine ? "Couldn't read this one. Fill in the details below." : "The reader needs internet the first time. Fill in the details, or try again online.", false, null);
+  } catch (e) {
+    const why = e?.message ? ` (${String(e.message).slice(0, 120)})` : "";
+    if (form.readTok === tok) readMsg(!navigator.onLine ? "The reader needs internet the first time. Fill in the details, or try again online."
+      : list.some(a => isPdf(a.type)) ? `Couldn't read this PDF${why}. It's still attached; fill in the details below, or send a screenshot of this message to Claude.`
+      : `Couldn't read this one${why}. Fill in the details below.`, false, null);
   } finally { if (form.readTok === tok) { $("#saveBtn").disabled = false; progressCb = null; } }
 }
 $("#rereadBtn").addEventListener("click", () => {
