@@ -173,3 +173,16 @@ details.guide[open] summary{margin-bottom:10px}
 .newcat{background:var(--tissue);border:1px solid var(--line);border-radius:12px;padding:10px}
 .newcat-row{display:flex;gap:6px}
 .newcat-row input{flex:1;min-width:0}
+
+.attbox{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px}
+.attbox-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.attbox .lbl{font-family:var(--f-mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.12em;color:var(--muted)}
+.attbox p{margin:0}
+.atts{display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:8px}
+.atts:empty{display:none}
+.att{position:relative;aspect-ratio:3/4;max-width:100%;border-radius:10px;border:1px solid var(--line);background:var(--tissue) center/cover no-repeat;display:flex;flex-direction:column;justify-content:flex-end;overflow:hidden}
+.att .att-icon{flex:1;display:grid;place-items:center;font-family:var(--f-mono);font-weight:500;color:var(--accent);font-size:.9rem}
+.att .att-name{font-size:.68rem;line-height:1.25;padding:4px 6px;background:color-mix(in srgb,var(--surface) 88%,transparent);color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.att .att-x{position:absolute;top:4px;right:4px;width:26px;height:26px;padding:0;justify-content:center;border-radius:50%;background:color-mix(in srgb,var(--surface) 90%,transparent);font-size:1rem;line-height:1}
+.attbox-actions{display:flex;gap:6px;flex-wrap:wrap}
+.attlinks{margin:14px 0 0;font-size:.88rem;line-height:1.7}

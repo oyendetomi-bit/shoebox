@@ -13,7 +13,7 @@ const SCOPE = "https://www.googleapis.com/auth/drive.file";
 const DAPI = "https://www.googleapis.com/drive/v3", UAPI = "https://www.googleapis.com/upload/drive/v3";
 const FOLDER = "application/vnd.google-apps.folder", SHEET = "application/vnd.google-apps.spreadsheet";
 const RECENT = 5;
-const APP_VERSION = "Version 6 · yearly totals, your own categories";
+const APP_VERSION = "Version 7 · long receipts and files";
 const { parseReceipt, CATEGORIES } = window.ShoeboxParse;
 const $ = s => document.querySelector(s);
 
@@ -54,7 +54,27 @@ const monthName = k => { const [y, m] = k.split("-").map(Number); return y && m 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const cleanName = s => String(s || "").replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").trim().slice(0, 90);
-const photoName = r => cleanName(`${r.date} ${r.merchant} ${money(r.total, r.currency)}`) + ".jpg";
+const baseName = r => cleanName(`${r.date} ${r.merchant} ${money(r.total, r.currency)}`);
+
+// ---------- photos & files on a receipt ----------
+// r.attachments = [{ key, type, origName, driveId, url, parent, fileName, pending }]
+// A new photo/file waits on this device (IndexedDB, under its key) with pending: true until it's uploaded.
+const isImage = t => /^image\//.test(t || "");
+const isPdf = t => t === "application/pdf";
+const readable = a => isImage(a.type) || isPdf(a.type);
+const extOf = a => (isImage(a.type) ? "jpg" : isPdf(a.type) ? "pdf" : ((a.origName || "").match(/\.([A-Za-z0-9]{1,6})$/)?.[1] || "file")).toLowerCase();
+const atts = r => r.attachments || [];
+function migrate(r) {
+  if (r.attachments) return r;
+  r.attachments = [];
+  if (r.photoId) r.attachments.push({ key: r.id, type: "image/jpeg", driveId: r.photoId, url: r.photoUrl, fileName: r.photoName, trashed: !!r.photoTrashed });
+  else if (r.hadPhoto && !r.deleted) r.attachments.push({ key: r.id, type: "image/jpeg", pending: true });
+  ["photoId", "photoUrl", "photoName", "photoCat", "photoTrashed"].forEach(k => delete r[k]);
+  return r;
+}
+receipts.forEach(migrate);
+const receiptLink = r => atts(r).length > 1 ? (r.folderUrl || atts(r)[0]?.url) : atts(r)[0]?.url;
+const attLabel = (a, i, n) => isImage(a.type) ? (n > 1 ? `Photo ${i + 1}` : "Photo") : (a.origName || (isPdf(a.type) ? "PDF" : "File"));
 const qstr = s => String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 let toastT; const toast = m => { const t = $("#toast"); t.textContent = m; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, 3000); };
 const appURL = () => location.origin + location.pathname.replace(/index\.html$/, "");
@@ -142,6 +162,32 @@ function multipart(meta, blob, type) {
 }
 const updateMedia = (id, blob, type) => api("PATCH", `${UAPI}/files/${id}?uploadType=media&fields=id,webViewLink`, { body: blob, headers: { "Content-Type": type } });
 const trash = id => api("PATCH", `${DAPI}/files/${id}?fields=id`, jsonBody({ trashed: true }));
+async function trashSafe(id) { try { await trash(id); } catch (e) { if (e.code === "auth" || e.code === "offline") throw e; } }
+async function moveRename(id, parent, name, knownParent) {
+  const params = new URLSearchParams({ fields: "id" });
+  if (knownParent !== parent) {
+    params.set("addParents", parent);
+    const old = knownParent || (await api("GET", `${DAPI}/files/${id}?fields=parents`).catch(() => null))?.parents?.join(",");
+    if (old && old !== parent) params.set("removeParents", old);
+  }
+  try { await api("PATCH", `${DAPI}/files/${id}?` + params, jsonBody({ name })); }
+  catch (e) { if (e.status !== 404 && e.status !== 403) throw e; }
+}
+// Small files go up in one request; big ones (long PDFs, videos) use Drive's resumable upload.
+async function upload(meta, blob, type) {
+  if (blob.size < 4.5e6) return multipart(meta, blob, type);
+  if (!hasToken()) throw { code: "auth" };
+  let r;
+  try {
+    r = await fetch(`${UAPI}/files?uploadType=resumable&fields=id,webViewLink`, { method: "POST", headers: { Authorization: "Bearer " + token.value, "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": type }, body: JSON.stringify(meta) });
+  } catch { throw { code: "offline" }; }
+  if (r.status === 401) { token = null; LS.del("token"); throw { code: "auth" }; }
+  const loc = r.headers.get("Location");
+  if (!r.ok || !loc) throw { code: "http", status: r.status, message: "Google Drive didn't accept the upload." };
+  try { r = await fetch(loc, { method: "PUT", headers: { "Content-Type": type }, body: blob }); } catch { throw { code: "offline" }; }
+  if (!r.ok) throw { code: "http", status: r.status, message: "The upload didn't finish." };
+  return r.json();
+}
 
 async function ensureRoot() {
   if (!drive.rootId) {
@@ -215,12 +261,12 @@ function categoryTotals(rs) {
 function ledgerCSV(receiptsSorted) {
   const q = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const blank = n => Array(n).fill("");
-  const out = [["Date", "Item", "Store", "Category", "Type", "Price", "Tax", "Currency", "Receipt total", "Receipt #", "Photo", "Year"]];
+  const out = [["Date", "Item", "Store", "Category", "Type", "Price", "Tax", "Currency", "Receipt total", "Receipt #", "Photo / file", "Year"]];
   receiptsSorted.forEach((r, ri) => {
     lineRows(r).forEach((x, i) => out.push([r.date, x.item, r.merchant, x.cat, r.kind === "business" ? "Business" : "Personal",
       x.price != null ? x.price.toFixed(2) : "", x.tax != null ? x.tax.toFixed(2) : "", r.currency,
       i === 0 ? (r.total ?? 0).toFixed(2) : "", `#${ri + 1}`,
-      i === 0 && r.photoUrl ? `=HYPERLINK("${r.photoUrl}","View photo")` : "", (r.date || "").slice(0, 4)]));
+      i === 0 && receiptLink(r) ? `=HYPERLINK("${receiptLink(r)}","${atts(r).length > 1 ? `View ${atts(r).length} files` : isImage(atts(r)[0].type) ? "View photo" : "View file"}")` : "", (r.date || "").slice(0, 4)]));
   });
   const n = Math.max(out.length, 2), R = c => `$${c}$2:$${c}$${n}`;
   const F = R("F"), G = R("G"), D = R("D"), E = R("E"), J = R("J"), L = R("L");
@@ -271,33 +317,42 @@ async function sync() {
   try {
     await ensureRoot();
     if (drive.dataId) {
-      try { const txt = await api("GET", `${DAPI}/files/${drive.dataId}?alt=media`, { as: "text" }); receipts = merge(receipts, JSON.parse(txt || "{}").receipts || []); }
+      try { const txt = await api("GET", `${DAPI}/files/${drive.dataId}?alt=media`, { as: "text" }); receipts = merge(receipts, JSON.parse(txt || "{}").receipts || []); receipts.forEach(migrate); }
       catch (e) { if (e.status === 404) drive.dataId = null; else if (!(e instanceof SyntaxError)) throw e; }
       saveLocal(); render();
     }
     for (const r of receipts) {
+      migrate(r);
+      const list = atts(r);
       if (r.deleted) {
-        if (r.photoId && !r.photoTrashed) { try { await trash(r.photoId); } catch (e) { if (e.status !== 404 && e.status !== 403) throw e; } r.photoTrashed = true; saveLocal(); }
+        for (const a of list) if (a.driveId && !a.trashed) { await trashSafe(a.driveId); a.trashed = true; saveLocal(); }
+        if (r.folderId && !r.folderTrashed) { await trashSafe(r.folderId); r.folderTrashed = true; saveLocal(); }
         continue;
       }
-      const blob = await getPhoto(r.id);
-      if (blob) {
-        const folder = await ensureFolder(r.category), name = photoName(r);
-        const f = await multipart({ name, parents: [folder] }, blob, blob.type || "image/jpeg");
-        Object.assign(r, { photoId: f.id, photoUrl: f.webViewLink, photoCat: r.category, photoName: name, updatedAt: Date.now() });
-        await delPhoto(r.id); saveLocal();
-      } else if (r.photoId && (r.photoCat !== r.category || r.photoName !== photoName(r))) {
-        const folder = await ensureFolder(r.category), name = photoName(r);
-        const params = new URLSearchParams({ fields: "id" });
-        if (r.photoCat !== r.category) {
-          params.set("addParents", folder);
-          const meta = await api("GET", `${DAPI}/files/${r.photoId}?fields=parents`).catch(() => null);
-          if (meta?.parents?.length) params.set("removeParents", meta.parents.join(","));
-        }
-        try { await api("PATCH", `${DAPI}/files/${r.photoId}?` + params, jsonBody({ name })); }
-        catch (e) { if (e.status !== 404 && e.status !== 403) throw e; }
-        Object.assign(r, { photoCat: r.category, photoName: name, updatedAt: Date.now() }); saveLocal();
+      if (r.removed?.length) { for (const id of r.removed) await trashSafe(id); r.removed = []; saveLocal(); }
+      if (!list.length) { if (r.folderId) { await trashSafe(r.folderId); ["folderId", "folderUrl", "folderCat", "folderName"].forEach(k => delete r[k]); saveLocal(); } continue; }
+      const base = baseName(r), catFolder = await ensureFolder(r.category), multi = list.length > 1;
+      let parent = catFolder;
+      // A receipt with several photos/files gets its own folder inside the category folder.
+      if (multi) {
+        if (!r.folderId) { const f = await createFolder(base, catFolder); Object.assign(r, { folderId: f.id, folderUrl: f.webViewLink, folderCat: r.category, folderName: base, updatedAt: Date.now() }); saveLocal(); }
+        else if (r.folderCat !== r.category || r.folderName !== base) { await moveRename(r.folderId, catFolder, base, r.folderCat === r.category ? catFolder : undefined); Object.assign(r, { folderCat: r.category, folderName: base, updatedAt: Date.now() }); saveLocal(); }
+        parent = r.folderId;
       }
+      for (let i = 0; i < list.length; i++) {
+        const a = list[i], name = (multi ? `${base} (${i + 1} of ${list.length})` : base) + "." + extOf(a);
+        if (a.pending) {
+          const blob = await getPhoto(a.key);
+          if (!blob) continue;                                   // saved on another device; it uploads from there
+          const f = await upload({ name, parents: [parent] }, blob, a.type || blob.type || "application/octet-stream");
+          Object.assign(a, { driveId: f.id, url: f.webViewLink, parent, fileName: name, pending: false }); r.updatedAt = Date.now();
+          await delPhoto(a.key); saveLocal();
+        } else if (a.driveId && (a.parent !== parent || a.fileName !== name)) {
+          await moveRename(a.driveId, parent, name, a.parent);
+          Object.assign(a, { parent, fileName: name }); r.updatedAt = Date.now(); saveLocal();
+        }
+      }
+      if (!multi && r.folderId) { await trashSafe(r.folderId); ["folderId", "folderUrl", "folderCat", "folderName"].forEach(k => delete r[k]); r.updatedAt = Date.now(); saveLocal(); }
     }
     for (const id of LS.get("trashLater", [])) { try { await trash(id); } catch (e) { if (e.code === "auth" || e.code === "offline") throw e; } }
     LS.set("trashLater", []);
@@ -321,22 +376,24 @@ async function sync() {
 let backfilling = false, backfillMsg = "";
 async function backfillItems() {
   if (backfilling || !hasToken() || !window.Tesseract) return;
-  const todo = live().filter(r => r.photoId && r.items === undefined);
+  const todo = live().filter(r => r.items === undefined && atts(r).some(a => a.driveId && readable(a)));
   if (!todo.length) return;
   backfilling = true;
   let done = 0;
   try {
     for (const r of todo) {
       backfillMsg = `Listing the items on ${todo.length === 1 ? "a saved receipt" : `saved receipts (${done + 1} of ${todo.length})`}…`; setSync();
-      let res;
-      try { res = await fetch(`${DAPI}/files/${r.photoId}?alt=media`, { headers: { Authorization: "Bearer " + token.value } }); } catch { break; }
-      if (res.status === 401) { token = null; LS.del("token"); break; }
-      if (!res.ok) { Object.assign(r, { items: [], updatedAt: Date.now() }); saveLocal(); continue; }
-      const prepared = await prepare(await res.blob());
-      const { data } = await (await getWorker()).recognize(prepared.ocrCanvas);
-      const p = parseReceipt(data.text, { today: todayISO(), learned: learnedMap(), confidence: data.confidence, categories: allCategories() });
+      const texts = [];
+      for (const a of atts(r).filter(a => a.driveId && readable(a))) {
+        const blob = await driveBlob(a.driveId);
+        if (blob) texts.push((await textFrom(blob, a.type)).text);
+      }
       const cur = receipts.find(x => x.id === r.id);
       if (!cur || cur.deleted || cur.items !== undefined) continue;
+      if (!texts.length) { Object.assign(cur, { items: [], updatedAt: Date.now() }); saveLocal(); continue; }
+      const popts = { today: todayISO(), learned: learnedMap(), categories: allCategories() };
+      const p = parseReceipt(joinParts(texts), popts);
+      if (texts.length > 1) p.items = itemsFromParts(texts, popts);
       const itemSum = p.items.reduce((a, i) => a + i.price, 0);
       // If the photo's tax makes the items add up exactly and the saved tax doesn't, the saved tax was a misread.
       const fixTax = p.tax != null && cur.total != null && Math.abs(itemSum + p.tax - cur.total) < 0.005 && Math.abs(itemSum + (cur.tax || 0) - cur.total) >= 0.005;
@@ -348,9 +405,17 @@ async function backfillItems() {
     if (done) { toast(`Listed the items on ${done} saved receipt${done > 1 ? "s" : ""}.`); sync(); } else setSync();
   }
 }
+async function driveBlob(id) {
+  if (!hasToken()) return null;
+  try {
+    const res = await fetch(`${DAPI}/files/${id}?alt=media`, { headers: { Authorization: "Bearer " + token.value } });
+    if (res.status === 401) { token = null; LS.del("token"); return null; }
+    return res.ok ? await res.blob() : null;
+  } catch { return null; }
+}
 function setSync() {
   const dot = $("#syncDot"), msg = $("#syncMsg"), btn = $("#syncBtn");
-  const unsynced = drive.dirty || receipts.some(r => !r.deleted && !r.photoId && r.hadPhoto);
+  const unsynced = drive.dirty || receipts.some(r => !r.deleted && atts(r).some(a => a.pending));
   btn.hidden = true;
   if (!clientId) { dot.className = "dot err"; msg.textContent = "Saved on this device. Set up Google Drive to file your receipts."; return; }
   if (syncing) { dot.className = "dot busy"; msg.textContent = "Saving to Google Drive…"; return; }
@@ -359,7 +424,7 @@ function setSync() {
   if (syncErr === "offline") { dot.className = "dot err"; msg.textContent = "You're offline. Receipts are saved here and will sync later."; btn.hidden = false; btn.textContent = "Try again"; return; }
   if (syncErr) { dot.className = "dot err"; msg.textContent = "Sync didn't finish: " + syncErr; btn.hidden = false; btn.textContent = "Try again"; return; }
   dot.className = "dot";
-  msg.textContent = drive.lastSync ? `All filed. Last synced ${new Date(drive.lastSync).toLocaleString("en-CA", { dateStyle: "medium", timeStyle: "short" })}.` : "Connected.";
+  msg.textContent = drive.lastSync ? `All filed. Last synced ${new Date(drive.lastSync).toLocaleString("en-CA", { dateStyle: "medium", timeStyle: "short" })}`.replace(/\.?$/, ".") : "Connected.";
   btn.hidden = false; btn.textContent = "Sync now";
 }
 // Called from taps: get a token if needed (popup must open inside the tap), then sync.
@@ -465,7 +530,7 @@ function render() {
   $("#recentNote").textContent = all.length > RECENT ? `${all.length - RECENT} more in your ledger` : "";
   $("#list").innerHTML = recent.length ? `<ul class="list">${recent.map(r => `<li><button class="row" type="button" data-id="${esc(r.id)}">
       <span class="tab ${r.kind === "business" ? "biz" : ""}"></span><span style="min-width:0"><div class="who">${esc(r.item || (r.items?.length ? r.items[0].name + (r.items.length > 1 ? ` + ${r.items.length - 1} more` : "") : "") || r.merchant || "Receipt")}</div>
-        <div class="meta"><span class="num">${esc(r.date || "")}</span><span>${esc(r.item ? r.merchant : "")}</span><span class="pill ${r.kind === "business" ? "biz" : ""}">${esc(r.category)}</span>${r.needsCheck ? `<span class="pill warn">Check</span>` : ""}${r.hadPhoto && !r.photoId ? `<span class="pill warn">Not in Drive yet</span>` : ""}</div></span>
+        <div class="meta"><span class="num">${esc(r.date || "")}</span><span>${esc(r.item ? r.merchant : "")}</span><span class="pill ${r.kind === "business" ? "biz" : ""}">${esc(r.category)}</span>${r.needsCheck ? `<span class="pill warn">Check</span>` : ""}${atts(r).some(a => a.pending) ? `<span class="pill warn">Not in Drive yet</span>` : ""}${atts(r).length > 1 ? `<span class="pill">${atts(r).length} files</span>` : ""}</div></span>
       <span class="amt">${money(r.total, r.currency)}</span></button></li>`).join("")}</ul>`
     : `<div class="empty"><strong>Nothing in the box yet</strong>Only your last five receipts show here. Everything else lives in your Drive folder and ledger.</div>`;
   renderAccount(); setSync();
@@ -485,14 +550,18 @@ async function prepare(file) {
   let bmp;
   try { bmp = await createImageBitmap(file, { imageOrientation: "from-image" }); } catch { bmp = await createImageBitmap(file); }
   const draw = max => { const s = Math.min(1, max / Math.max(bmp.width, bmp.height)); const c = document.createElement("canvas"); c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s); c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height); return c; };
-  const photo = await new Promise(r => draw(1600).toBlob(b => r(b || file), "image/jpeg", 0.8));
+  const photo = await new Promise(r => draw(2000).toBlob(b => r(b || file), "image/jpeg", 0.82));
   // OCR copy: cropped to the receipt, larger, grayscale, contrast-stretched
+  // Cut out the receipt first, then enlarge just that part (in one high-quality step) so its longer side is 2200px.
   const box = findReceipt(draw(800));
-  const full = draw(2200), sx = full.width, sy = full.height;
+  const bx = box.x0 * bmp.width, by = box.y0 * bmp.height, bw = (box.x1 - box.x0) * bmp.width, bh = (box.y1 - box.y0) * bmp.height;
+  const k = Math.min(2200 / Math.max(bw, bh), 3);
   const c = document.createElement("canvas");
-  c.width = Math.round((box.x1 - box.x0) * sx); c.height = Math.round((box.y1 - box.y0) * sy);
-  c.getContext("2d").drawImage(full, box.x0 * sx, box.y0 * sy, c.width, c.height, 0, 0, c.width, c.height);
-  const ctx = c.getContext("2d"), img = ctx.getImageData(0, 0, c.width, c.height), d = img.data;
+  c.width = Math.round(bw * k); c.height = Math.round(bh * k);
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(bmp, bx, by, bw, bh, 0, 0, c.width, c.height);
+  const img = ctx.getImageData(0, 0, c.width, c.height), d = img.data;
   let lo = 255, hi = 0; const g = new Uint8ClampedArray(d.length / 4);
   for (let i = 0, j = 0; i < d.length; i += 4, j++) { const v = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; g[j] = v; if (v < lo) lo = v; if (v > hi) hi = v; }
   const span = Math.max(1, hi - lo);
@@ -536,6 +605,97 @@ function findReceipt(c) {
     return box;
   } catch { return { x0: 0, y0: 0, x1: 1, y1: 1 }; }
 }
+// Text from one photo or PDF. Digital PDFs (e-receipts) are read directly; scanned ones are read like photos.
+async function textFrom(blob, type, onPage) {
+  if (isPdf(type)) {
+    const pdfjs = await loadPdfJs();
+    const doc = await pdfjs.getDocument({ data: await blob.arrayBuffer() }).promise;
+    const out = [];
+    for (let n = 1; n <= Math.min(doc.numPages, 12); n++) {
+      onPage && onPage(n, doc.numPages);
+      const page = await doc.getPage(n);
+      const tc = await page.getTextContent();
+      const rows = [];
+      tc.items.forEach(it => { if (!it.str.trim()) return; const y = Math.round(it.transform[5]); let row = rows.find(r => Math.abs(r.y - y) <= 3); if (!row) rows.push(row = { y, parts: [] }); row.parts.push({ x: it.transform[4], s: it.str }); });
+      let text = rows.sort((a, b) => b.y - a.y).map(r => r.parts.sort((a, b) => a.x - b.x).map(p => p.s).join(" ").replace(/\s+/g, " ").trim()).join("\n");
+      if (text.replace(/\s/g, "").length < 25) {                   // a scanned page: read the picture
+        const vp = page.getViewport({ scale: 2.2 }), c = document.createElement("canvas");
+        c.width = vp.width; c.height = vp.height;
+        await page.render({ canvasContext: c.getContext("2d"), viewport: vp }).promise;
+        text = (await (await getWorker()).recognize(c)).data.text;
+      }
+      out.push(text);
+    }
+    return { text: out.join("\n"), confidence: 90 };
+  }
+  const prepared = await prepare(blob);
+  const { data } = await (await getWorker()).recognize(prepared.ocrCanvas);
+  return { text: data.text, confidence: data.confidence };
+}
+let pdfP = null;
+function loadPdfJs() {
+  if (!pdfP) pdfP = new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    s.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"; res(window.pdfjsLib); };
+    s.onerror = () => { pdfP = null; rej(new Error("PDF reader didn't load")); };
+    document.head.appendChild(s);
+  });
+  return pdfP;
+}
+// Join the text of several photos of one long receipt. People overlap the photos a little,
+// so lines repeated at the end of one photo and the start of the next are dropped.
+function joinParts(texts) {
+  const norm = l => l.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const similar = (a, b) => {
+    a = norm(a); b = norm(b); if (!a || !b) return false; if (a === b) return true;
+    if (Math.abs(a.length - b.length) > Math.max(a.length, b.length) * 0.3) return false;
+    const m = a.length, n = b.length, d = Array.from({ length: m + 1 }, (_, i) => [i]);
+    for (let j = 1; j <= n; j++) d[0][j] = j;
+    for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    return d[m][n] <= Math.max(a.length, b.length) * 0.25;
+  };
+  let lines = [];
+  texts.forEach((t, k) => {
+    const next = t.split(/\r?\n/).filter(l => l.trim());
+    if (k && lines.length) {
+      let best = 0;
+      for (let ov = Math.min(12, lines.length, next.length); ov >= 1; ov--) {
+        const tail = lines.slice(-ov), head = next.slice(0, ov);
+        if (tail.every((l, i) => similar(l, head[i]))) { best = ov; break; }
+      }
+      if (!best) {   // the overlap may start a few lines into the new photo (the top edge is often cut off)
+        for (let skip = 1; skip <= 3 && !best; skip++) for (let ov = Math.min(12, lines.length, next.length - skip); ov >= 2; ov--) {
+          if (lines.slice(-ov).every((l, i) => similar(l, next[skip + i]))) { best = ov + skip; break; }
+        }
+      }
+      lines = lines.concat(next.slice(best));
+    } else lines = lines.concat(next);
+  });
+  return lines.join("\n");
+}
+// Items across several photos of one long receipt. Where photos overlap, the same items appear at the end of one
+// and the start of the next; they're matched by their run of prices (more reliable than the blurry names).
+function itemsFromParts(texts, opts) {
+  const lists = texts.map(t => parseReceipt(t, opts).items);
+  const better = (x, y) => (x.name === "Unreadable item" || (y.name !== "Unreadable item" && y.name.length > x.name.length + 3)) ? { ...x, name: y.name } : x;
+  const close = (a, b) => Math.abs(a.price - b.price) < 0.005;
+  const nameish = (a, b) => { const n = s => s.toLowerCase().replace(/[^a-z]/g, ""); const x = n(a.name), y = n(b.name); return x && y && (x.includes(y) || y.includes(x)); };
+  return lists.reduce((acc, next) => {
+    if (!acc.length) return next.slice();
+    let best = null;
+    for (let skip = 0; skip <= 2 && !best; skip++) {               // the new photo's first line may be cut off
+      for (let k = Math.min(acc.length, next.length - skip); k >= 1; k--) {
+        const tail = acc.slice(-k), head = next.slice(skip, skip + k);
+        const miss = tail.filter((x, i) => !close(x, head[i])).length;
+        if ((k >= 2 && miss === 0) || (k >= 4 && miss <= 1) || (k === 1 && miss === 0 && nameish(tail[0], head[0]))) { best = { k, skip }; break; }
+      }
+    }
+    if (!best) return acc.concat(next);
+    const { k, skip } = best, start = acc.length - k;
+    return acc.slice(0, start).concat(acc.slice(start).map((x, i) => close(x, next[skip + i]) ? better(x, next[skip + i]) : x), next.slice(skip + k));
+  }, []);
+}
 function learnedMap() {
   const m = {};
   live().slice().sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0)).forEach(r => { if (r.merchant) m[r.merchant.toLowerCase()] = { category: r.category, kind: r.kind }; });
@@ -543,7 +703,7 @@ function learnedMap() {
 }
 
 // ---------- edit sheet ----------
-const form = { kind: "personal", editing: null, photo: null, lowConf: false, ocrText: "" };
+const form = { kind: "personal", editing: null, atts: [], removed: [], lowConf: false, ocrText: "" };
 function setKind(v) { form.kind = v; document.querySelectorAll("#fKind button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.v === v))); }
 document.querySelectorAll("#fKind button").forEach(b => b.addEventListener("click", () => setKind(b.dataset.v)));
 function itemRow(it = {}) {
@@ -636,77 +796,118 @@ function readMsg(text, spinning, pct) {
   $("#readStatus").hidden = false; $("#readSpin").hidden = !spinning; $("#readMsg").textContent = text;
   $("#readBarWrap").hidden = pct == null; if (pct != null) $("#readBar").style.width = Math.round(pct * 100) + "%";
 }
-function openEdit({ title, receipt, photo, previewUrl }) {
+function openEdit({ title, receipt }) {
   $("#editTitle").textContent = title;
-  Object.assign(form, { editing: receipt || null, photo: photo || null, lowConf: false, ocrText: "" });
-  const pv = $("#editPreview");
-  if (previewUrl) { pv.src = previewUrl; pv.hidden = false; } else { pv.hidden = true; pv.removeAttribute("src"); }
+  Object.assign(form, { editing: receipt || null, lowConf: false, ocrText: "", removed: [], readTok: null,
+    atts: atts(receipt || {}).map(a => ({ ...a })) });
   fillForm(receipt || {}); $("#readStatus").hidden = true; $("#ocrDetails").hidden = true; $("#saveBtn").disabled = false;
-  form.readTok = null;
-  $("#rereadBtn").hidden = !(receipt?.photoId);
+  renderAtts();
   $("#editSheet").hidden = false;
 }
-const closeEdit = () => { $("#editSheet").hidden = true; form.photo = null; form.editing = null; form.readTok = null; };
+const closeEdit = () => { $("#editSheet").hidden = true; (form.atts || []).forEach(a => a.preview && URL.revokeObjectURL(a.preview)); form.atts = []; form.editing = null; form.readTok = null; };
 $("#editClose").addEventListener("click", closeEdit);
 $("#manualBtn").addEventListener("click", () => openEdit({ title: "Add a receipt" }));
 
-// reread = true: reading a saved receipt's photo again from Drive. Only items (and empty fields) are filled,
-// and the photo isn't uploaded again.
-async function onPhoto(file, reread = false) {
-  if (!file) return;
-  if (!reread) openEdit({ title: "Check this receipt", previewUrl: URL.createObjectURL(file) });
-  else { const pv = $("#editPreview"); pv.src = URL.createObjectURL(file); pv.hidden = false; }
+function renderAtts() {
+  const list = form.atts || [], n = list.length;
+  $("#attList").innerHTML = list.map((a, i) => {
+    const pic = a.preview && isImage(a.type);
+    return `<div class="att${pic ? " pic" : ""}"${pic ? ` style="background-image:url('${a.preview}')"` : ""}>
+      ${pic ? "" : `<span class="att-icon">${isImage(a.type) ? "IMG" : isPdf(a.type) ? "PDF" : esc(extOf(a).toUpperCase().slice(0, 4))}</span>`}
+      <span class="att-name">${esc(attLabel(a, i, n))}${a.driveId && !a.preview ? " · in Drive" : ""}</span>
+      <button type="button" class="att-x" data-i="${i}" aria-label="Remove ${esc(attLabel(a, i, n))}">×</button></div>`;
+  }).join("");
+  $("#attEmpty").hidden = n > 0;
+  $("#rereadBtn").hidden = !(form.editing && list.some(a => a.driveId && readable(a)));
+}
+$("#attList").addEventListener("click", e => {
+  const b = e.target.closest(".att-x"); if (!b) return;
+  const [a] = form.atts.splice(+b.dataset.i, 1);
+  if (a?.driveId) form.removed.push(a.driveId);
+  if (a?.preview) URL.revokeObjectURL(a.preview);
+  renderAtts();
+  if (a && readable(a) && form.atts.some(readable)) readAll(false);
+});
+// Add photos and files to the receipt being edited. Photos are shrunk to a sharp, small JPEG.
+async function addFiles(fileList) {
+  const files = [...(fileList || [])]; if (!files.length) return;
+  for (const f of files) {
+    let type = f.type || "application/octet-stream", blob = f;
+    if (isImage(type) && !/svg/.test(type)) {
+      try { blob = (await prepare(f)).photo; type = "image/jpeg"; } catch { /* keep the original if it can't be decoded here */ }
+    } else if (!f.type && /\.pdf$/i.test(f.name)) type = "application/pdf";
+    form.atts.push({ key: uid(), type, origName: f.name, blob, preview: URL.createObjectURL(blob), pending: true });
+  }
+  renderAtts();
+  if (files.some(f => isImage(f.type) || isPdf(f.type) || /\.pdf$/i.test(f.name))) readAll(false);
+  else readMsg(`Attached ${files.length === 1 ? `"${files[0].name}"` : `${files.length} files`}. Fill in the details below.`, false, null);
+}
+// Read every photo/PDF on this receipt in order, as one receipt.
+async function readAll(refetch) {
   const tok = form.readTok = {};
-  readMsg("Getting the photo ready…", true, null);
-  let prepared;
-  try { prepared = await prepare(file); } catch { readMsg("That photo couldn't be opened. Try another one, or type the details.", false, null); return; }
-  if (form.readTok !== tok) return;
-  if (!reread) form.photo = prepared.photo;
+  const list = form.atts.filter(readable);
+  if (!list.length) return;
   $("#saveBtn").disabled = true;
-  progressCb = m => {
-    if (form.readTok !== tok) return;
-    if (m.status === "recognizing text") readMsg("Reading the receipt…", true, m.progress);
-    else if (/loading|initializ/.test(m.status)) readMsg("Setting up the reader (first time only)…", true, m.progress || 0);
-  };
+  progressCb = null;
   try {
-    const w = await getWorker();
-    const { data } = await w.recognize(prepared.ocrCanvas);
+    const texts = [];
+    let conf = 100;
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i], lab = list.length > 1 ? ` ${i + 1} of ${list.length}` : "";
+      if (a.text && !refetch) { texts.push(a.text); continue; }
+      let blob = a.blob;
+      if (!blob && a.driveId) { readMsg(`Fetching ${isPdf(a.type) ? "the PDF" : "photo" + lab} from Google Drive…`, true, null); blob = await driveBlob(a.driveId); }
+      if (form.readTok !== tok) return;
+      if (!blob) { readMsg("Couldn't fetch the saved photos from Google Drive. Connect Google Drive and try again.", false, null); return; }
+      progressCb = m => {
+        if (form.readTok !== tok) return;
+        if (m.status === "recognizing text") readMsg(`Reading ${isPdf(a.type) ? "the PDF" : "photo" + lab}…`, true, m.progress);
+        else if (/loading|initializ/.test(m.status)) readMsg("Setting up the reader (first time only)…", true, m.progress || 0);
+      };
+      readMsg(`Reading ${isPdf(a.type) ? "the PDF" : "photo" + lab}…`, true, null);
+      const res = await textFrom(blob, a.type, (p, n) => n > 1 && readMsg(`Reading PDF page ${p} of ${n}…`, true, null));
+      if (form.readTok !== tok) return;
+      a.text = res.text; conf = Math.min(conf, res.confidence ?? 100);
+      texts.push(res.text);
+    }
     if (form.readTok !== tok || $("#editSheet").hidden) return;
-    const r = parseReceipt(data.text, { today: todayISO(), learned: learnedMap(), confidence: data.confidence, categories: allCategories() });
-    form.ocrText = data.text;
-    $("#ocrText").textContent = data.text.trim() || "(no text found)"; $("#ocrDetails").hidden = false;
-    if (reread) {
+    const text = joinParts(texts);
+    const popts = { today: todayISO(), learned: learnedMap(), confidence: conf, categories: allCategories() };
+    const r = parseReceipt(text, popts);
+    if (texts.length > 1) r.items = itemsFromParts(texts, popts);
+    form.ocrText = text;
+    $("#ocrText").textContent = text.trim() || "(no text found)"; $("#ocrDetails").hidden = false;
+    const parts = list.length > 1 ? ` from ${list.length} ${list.every(a => isImage(a.type)) ? "photos" : "files"}` : "";
+    if (form.editing) {     // a saved receipt: refresh the items, fill only empty fields
       setItems(r.items);
       if (!$("#fTax").value && r.tax != null) $("#fTax").value = r.tax.toFixed(2);
       if (!$("#fTotal").value && r.total != null) $("#fTotal").value = r.total.toFixed(2);
       checkItems();
-      readMsg(r.items.length ? `Found ${r.items.length} item${r.items.length > 1 ? "s" : ""}. Check them and save.` : "No item lines found on this photo. You can add them by hand.", false, null);
+      readMsg(r.items.length ? `Found ${r.items.length} item${r.items.length > 1 ? "s" : ""}${parts}. Check them and save.` : "No item lines found. You can add them by hand.", false, null);
       return;
     }
-    fillForm({ ...r, currency: "CAD" });
+    const keep = { item: $("#fItem").value, kind: form.kind };
+    fillForm({ ...r, currency: "CAD", item: keep.item || r.item, kind: r.kind });
     form.lowConf = !r.confident;
     const unread = r.items.filter(i => i.name === "Unreadable item").length;
-    readMsg(r.total == null ? "Couldn't find the total. Please fill in the details."
+    readMsg(r.total == null ? (list.length > 1 || form.atts.length > 1 ? "Couldn't find the total yet. If the receipt continues, add the next photo; otherwise fill it in." : "Couldn't find the total. If the receipt is long, add another photo of the rest; otherwise fill it in.")
       : !r.confident ? "Some parts were hard to read. Please double-check the store, date and total."
-      : r.items.length ? `Done. Found ${r.items.length} item${r.items.length > 1 ? "s" : ""}${unread ? `; ${unread} name${unread > 1 ? "s were" : " was"} too faint to read, so rename those` : ""}. Check them and save.`
+      : r.items.length ? `Done. Found ${r.items.length} item${r.items.length > 1 ? "s" : ""}${parts}${unread ? `; ${unread} name${unread > 1 ? "s were" : " was"} too faint to read, so rename those` : ""}. Check them and save.`
       : "Done. No item lines found; add them below if you like.", false, null);
   } catch {
-    readMsg(navigator.onLine ? "Couldn't read this one. Fill in the details below." : "The reader needs internet the first time. Fill in the details, or try again online.", false, null);
+    if (form.readTok === tok) readMsg(navigator.onLine ? "Couldn't read this one. Fill in the details below." : "The reader needs internet the first time. Fill in the details, or try again online.", false, null);
   } finally { if (form.readTok === tok) { $("#saveBtn").disabled = false; progressCb = null; } }
 }
-// "Read photo again" for a saved receipt whose photo is in Drive.
-$("#rereadBtn").addEventListener("click", async () => {
-  const r = form.editing; if (!r?.photoId) return;
-  if (!hasToken()) { signIn().then(() => $("#rereadBtn").click(), () => toast("Connect Google Drive first.")); return; }
-  readMsg("Fetching the photo from Google Drive…", true, null);
-  try {
-    const res = await fetch(`${DAPI}/files/${r.photoId}?alt=media`, { headers: { Authorization: "Bearer " + token.value } });
-    if (!res.ok) throw res.status;
-    onPhoto(await res.blob(), true);
-  } catch { readMsg("Couldn't fetch the photo from Drive. Check your connection and try again.", false, null); }
+$("#rereadBtn").addEventListener("click", () => {
+  if (!hasToken() && form.atts.some(a => !a.blob)) { signIn().then(() => readAll(true), () => toast("Connect Google Drive first.")); return; }
+  readAll(true);
 });
-$("#camInput").addEventListener("change", e => { onPhoto(e.target.files[0]); e.target.value = ""; });
-$("#libInput").addEventListener("change", e => { onPhoto(e.target.files[0]); e.target.value = ""; });
+const startWith = files => { if (!files?.length) return; openEdit({ title: "Check this receipt" }); addFiles(files); };
+$("#camInput").addEventListener("change", e => { startWith([...e.target.files]); e.target.value = ""; });
+$("#libInput").addEventListener("change", e => { startWith([...e.target.files]); e.target.value = ""; });
+$("#fileInput").addEventListener("change", e => { startWith([...e.target.files]); e.target.value = ""; });
+$("#addCamInput").addEventListener("change", e => { addFiles([...e.target.files]); e.target.value = ""; });
+$("#addFileInput").addEventListener("change", e => { addFiles([...e.target.files]); e.target.value = ""; });
 
 $("#editForm").addEventListener("submit", async e => {
   e.preventDefault();
@@ -716,25 +917,33 @@ $("#editForm").addEventListener("submit", async e => {
   // Ask Google for access now, while we're still inside the tap (browsers block popups otherwise).
   let auth = null;
   if (clientId && !hasToken() && navigator.onLine) auth = signIn(false).catch(() => null);
-  const prev = form.editing, photo = form.photo, now = Date.now();
+  const prev = form.editing, now = Date.now();
   const r = {
     ...(prev || {}), id: prev?.id || uid(),
     item: $("#fItem").value.trim(), items: readItems(), merchant, date: $("#fDate").value || todayISO(), total, tax: parseAmt($("#fTax").value),
     currency: $("#fCurrency").value, category: $("#fCategory").value === "__new__" ? "Other" : $("#fCategory").value, kind: form.kind,
-    hadPhoto: !!(photo || prev?.hadPhoto), createdAt: prev?.createdAt || now, updatedAt: now,
+    hadPhoto: form.atts.length > 0, createdAt: prev?.createdAt || now, updatedAt: now,
     needsCheck: prev ? false : form.lowConf,
   };
-  const oldPhotoId = photo && prev?.photoId ? prev.photoId : null;
-  if (photo) { await putPhoto(r.id, photo); r.photoId = null; r.photoUrl = null; }
+  for (const a of form.atts) if (a.blob) await putPhoto(a.key, a.blob);
+  r.attachments = form.atts.map(({ blob, preview, text, ...a }) => a);
+  r.removed = [...(prev?.removed || []), ...form.removed];
+  // photos removed before they were ever uploaded: drop them from this device
+  for (const a of atts(prev || {})) if (a.pending && !r.attachments.some(b => b.key === a.key)) await delPhoto(a.key);
   receipts = receipts.filter(x => x.id !== r.id).concat(r);
   drive.dirty = true; saveLocal(); closeEdit(); render();
-  if (oldPhotoId) { if (hasToken()) trash(oldPhotoId).catch(() => {}); else { const g = LS.get("trashLater", []); g.push(oldPhotoId); LS.set("trashLater", g); } }
   toast(prev ? "Updated." : "Saved.");
   if (auth) await auth;
   sync();
 });
 
 // ---------- detail ----------
+function attLinks(r) {
+  const list = atts(r); if (!list.length) return "";
+  const links = list.map((a, i) => a.url ? `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(attLabel(a, i, list.length))}</a>` : `<span class="small">${esc(attLabel(a, i, list.length))} (on this device, goes to Drive at the next sync)</span>`);
+  const all = list.length > 1 && r.folderUrl ? `<a href="${esc(r.folderUrl)}" target="_blank" rel="noopener">Open all ${list.length} in Google Drive</a> · ` : "";
+  return `<p class="attlinks">${all}${links.join(" · ")}</p>`;
+}
 let detailId = null;
 function openDetail(id) {
   const r = live().find(x => x.id === id); if (!r) return;
@@ -744,7 +953,7 @@ function openDetail(id) {
   $("#slip").innerHTML = (its.length ? `<div class="itemlist">${its.map(i => `<span>${esc(i.name)}</span><span>${money(i.price, r.currency)}</span>`).join("")}</div>` : "") + `<dl>${r.item ? `<dt>Purchase</dt><dd>${esc(r.item)}</dd>` : ""}<dt>Store</dt><dd>${esc(r.merchant)}</dd><dt>Date</dt><dd>${esc(r.date)}</dd><dt>Category</dt><dd>${esc(r.category)}</dd>
     <dt>Type</dt><dd>${r.kind === "business" ? "Business" : "Personal"}</dd>
     <dt>Tax</dt><dd>${r.tax != null ? money(r.tax, r.currency) : "—"}</dd><dt class="total">Total</dt><dd class="total">${money(r.total, r.currency)}</dd></dl>
-    ${r.photoUrl ? `<p style="margin:14px 0 0;font-size:.88rem"><a href="${esc(r.photoUrl)}" target="_blank" rel="noopener">View photo in Google Drive</a></p>` : r.hadPhoto ? `<p class="small" style="margin:14px 0 0">The photo is saved on this device and goes to Drive at the next sync.</p>` : ""}`;
+    ${attLinks(r)}`;
   $("#detailSheet").hidden = false;
 }
 $("#detailClose").addEventListener("click", () => $("#detailSheet").hidden = true);
@@ -756,7 +965,7 @@ $("#delYes").addEventListener("click", async () => {
   let auth = null;
   if (clientId && !hasToken() && navigator.onLine) auth = signIn(false).catch(() => null);
   Object.assign(r, { deleted: true, updatedAt: Date.now() });
-  await delPhoto(r.id);
+  for (const a of atts(r)) if (a.pending) await delPhoto(a.key);
   drive.dirty = true; saveLocal(); $("#detailSheet").hidden = true; render(); toast("Deleted.");
   if (auth) await auth;
   sync();
