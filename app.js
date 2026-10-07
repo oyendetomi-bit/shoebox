@@ -13,7 +13,7 @@ const SCOPE = "https://www.googleapis.com/auth/drive.file";
 const DAPI = "https://www.googleapis.com/drive/v3", UAPI = "https://www.googleapis.com/upload/drive/v3";
 const FOLDER = "application/vnd.google-apps.folder", SHEET = "application/vnd.google-apps.spreadsheet";
 const RECENT = 5;
-const APP_VERSION = "Version 8 · PDF reading fixed";
+const APP_VERSION = "Version 9 · several receipts at once";
 const { parseReceipt, CATEGORIES } = window.ShoeboxParse;
 const $ = s => document.querySelector(s);
 
@@ -550,10 +550,13 @@ async function prepare(file) {
   let bmp;
   try { bmp = await createImageBitmap(file, { imageOrientation: "from-image" }); } catch { bmp = await createImageBitmap(file); }
   const draw = max => { const s = Math.min(1, max / Math.max(bmp.width, bmp.height)); const c = document.createElement("canvas"); c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s); c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height); return c; };
-  const photo = await new Promise(r => draw(2000).toBlob(b => r(b || file), "image/jpeg", 0.82));
+  const pc = draw(2000);
+  const photo = await new Promise(r => pc.toBlob(b => r(b || file), "image/jpeg", 0.82));
+  pc.width = pc.height = 0;
   // OCR copy: cropped to the receipt, larger, grayscale, contrast-stretched
   // Cut out the receipt first, then enlarge just that part (in one high-quality step) so its longer side is 2200px.
-  const box = findReceipt(draw(800));
+  const small = draw(800), box = findReceipt(small);
+  small.width = small.height = 0;
   const bx = box.x0 * bmp.width, by = box.y0 * bmp.height, bw = (box.x1 - box.x0) * bmp.width, bh = (box.y1 - box.y0) * bmp.height;
   const k = Math.min(2200 / Math.max(bw, bh), 3);
   const c = document.createElement("canvas");
@@ -567,6 +570,7 @@ async function prepare(file) {
   const span = Math.max(1, hi - lo);
   for (let i = 0, j = 0; i < d.length; i += 4, j++) { const v = Math.min(255, Math.max(0, (g[j] - lo) * 255 / span)); d[i] = d[i + 1] = d[i + 2] = v; }
   ctx.putImageData(img, 0, 0);
+  try { bmp.close?.(); } catch {}
   return { photo, ocrCanvas: c };
 }
 // Find the receipt in a photo by where the printed text is (works on any background and lighting).
@@ -638,6 +642,7 @@ async function textFrom(blob, type, onPage) {
   }
   const prepared = await prepare(blob);
   const { data } = await (await getWorker()).recognize(prepared.ocrCanvas);
+  prepared.ocrCanvas.width = prepared.ocrCanvas.height = 0;
   return { text: data.text, confidence: data.confidence };
 }
 let pdfP = null;
@@ -815,10 +820,15 @@ function openEdit({ title, receipt }) {
     atts: atts(receipt || {}).map(a => ({ ...a })) });
   fillForm(receipt || {}); $("#readStatus").hidden = true; $("#ocrDetails").hidden = true; $("#saveBtn").disabled = false;
   renderAtts();
+  const inQueue = queueTotal > 1;
+  $("#queueBar").hidden = !inQueue;
+  if (inQueue) $("#queueText").textContent = `Receipt ${queueTotal - queue.length} of ${queueTotal}${queue.length ? ` · ${queue.length} more after this` : " · last one"}`;
+  $("#saveBtn").textContent = inQueue && queue.length ? "Save & next" : "Save receipt";
+  $("#editClose").textContent = inQueue && queue.length ? "Skip" : "Cancel";
   $("#editSheet").hidden = false;
 }
 const closeEdit = () => { $("#editSheet").hidden = true; (form.atts || []).forEach(a => a.preview && URL.revokeObjectURL(a.preview)); form.atts = []; form.editing = null; form.readTok = null; };
-$("#editClose").addEventListener("click", closeEdit);
+$("#editClose").addEventListener("click", () => { const skipping = queueTotal > 1 && queue.length; closeEdit(); if (skipping) nextInQueue(); else { queue = []; queueTotal = 0; } });
 $("#manualBtn").addEventListener("click", () => openEdit({ title: "Add a receipt" }));
 
 function renderAtts() {
@@ -864,7 +874,7 @@ async function readAll(refetch) {
   progressCb = null;
   try {
     const texts = [];
-    let conf = 100;
+    let conf = 100, failed = 0;
     for (let i = 0; i < list.length; i++) {
       const a = list[i], lab = list.length > 1 ? ` ${i + 1} of ${list.length}` : "";
       if (a.text && !refetch) { texts.push(a.text); continue; }
@@ -878,7 +888,9 @@ async function readAll(refetch) {
         else if (/loading|initializ/.test(m.status)) readMsg("Setting up the reader (first time only)…", true, m.progress || 0);
       };
       readMsg(`Reading ${isPdf(a.type) ? "the PDF" : "photo" + lab}…`, true, null);
-      const res = await textFrom(blob, a.type, (p, n) => n > 1 && readMsg(`Reading PDF page ${p} of ${n}…`, true, null));
+      let res;
+      try { res = await textFrom(blob, a.type, (p, n) => n > 1 && readMsg(`Reading PDF page ${p} of ${n}…`, true, null)); }
+      catch (e) { if (list.length === 1) throw e; failed++; continue; }
       if (form.readTok !== tok) return;
       a.text = res.text; conf = Math.min(conf, res.confidence ?? 100);
       texts.push(res.text);
@@ -890,7 +902,7 @@ async function readAll(refetch) {
     if (texts.length > 1) r.items = itemsFromParts(texts, popts);
     form.ocrText = text;
     $("#ocrText").textContent = text.trim() || "(no text found)"; $("#ocrDetails").hidden = false;
-    const parts = list.length > 1 ? ` from ${list.length} ${list.every(a => isImage(a.type)) ? "photos" : "files"}` : "";
+    const parts = (list.length > 1 ? ` from ${list.length - failed} ${list.every(a => isImage(a.type)) ? "photos" : "files"}` : "") + (failed ? ` (${failed} couldn't be read)` : "");
     if (form.editing) {     // a saved receipt: refresh the items, fill only empty fields
       setItems(r.items);
       if (!$("#fTax").value && r.tax != null) $("#fTax").value = r.tax.toFixed(2);
@@ -918,7 +930,38 @@ $("#rereadBtn").addEventListener("click", () => {
   if (!hasToken() && form.atts.some(a => !a.blob)) { signIn().then(() => readAll(true), () => toast("Connect Google Drive first.")); return; }
   readAll(true);
 });
-const startWith = files => { if (!files?.length) return; openEdit({ title: "Check this receipt" }); addFiles(files); };
+// Several photos/files chosen at once: ask whether they're separate receipts or parts of one long receipt.
+let queue = [], queueTotal = 0, pendingPick = null;
+const startWith = files => {
+  if (!files?.length) return;
+  if (files.length === 1) { queue = []; queueTotal = 0; openEdit({ title: "Check this receipt" }); addFiles(files); return; }
+  pendingPick = files;
+  $("#multiCount").textContent = `You picked ${files.length} ${files.every(f => isImage(f.type)) ? "photos" : "files"}.`;
+  $("#multiSheet").hidden = false;
+};
+function openQueued(file) {
+  const n = queueTotal - queue.length;
+  openEdit({ title: queueTotal > 1 ? `Receipt ${n} of ${queueTotal}` : "Check this receipt" });
+  addFiles([file]);
+}
+$("#multiSeparate").addEventListener("click", () => {
+  const files = pendingPick || []; pendingPick = null; $("#multiSheet").hidden = true;
+  queueTotal = files.length; queue = files.slice(1);
+  openQueued(files[0]);
+});
+$("#multiOne").addEventListener("click", () => {
+  const files = pendingPick || []; pendingPick = null; $("#multiSheet").hidden = true;
+  queue = []; queueTotal = 0;
+  openEdit({ title: "Check this receipt" }); addFiles(files);
+});
+$("#multiCancel").addEventListener("click", () => { pendingPick = null; $("#multiSheet").hidden = true; });
+function nextInQueue() {
+  if (!queue.length) { queueTotal = 0; return false; }
+  const f = queue.shift();
+  setTimeout(() => openQueued(f), 250);
+  return true;
+}
+$("#queueStop").addEventListener("click", () => { const left = queue.length + 1; queue = []; queueTotal = 0; closeEdit(); toast(`Stopped. ${left} receipt${left > 1 ? "s" : ""} not added.`); });
 $("#camInput").addEventListener("change", e => { startWith([...e.target.files]); e.target.value = ""; });
 $("#libInput").addEventListener("change", e => { startWith([...e.target.files]); e.target.value = ""; });
 $("#fileInput").addEventListener("change", e => { startWith([...e.target.files]); e.target.value = ""; });
@@ -948,7 +991,9 @@ $("#editForm").addEventListener("submit", async e => {
   for (const a of atts(prev || {})) if (a.pending && !r.attachments.some(b => b.key === a.key)) await delPhoto(a.key);
   receipts = receipts.filter(x => x.id !== r.id).concat(r);
   drive.dirty = true; saveLocal(); closeEdit(); render();
-  toast(prev ? "Updated." : "Saved.");
+  const more = !prev && queueTotal > 1 && queue.length;
+  toast(prev ? "Updated." : more ? `Saved. ${queue.length} to go.` : "Saved.");
+  if (more) nextInQueue(); else if (!prev) { queue = []; queueTotal = 0; }
   if (auth) await auth;
   sync();
 });
@@ -986,7 +1031,7 @@ $("#delYes").addEventListener("click", async () => {
   if (auth) await auth;
   sync();
 });
-document.addEventListener("keydown", e => { if (e.key === "Escape") { if (!$("#editSheet").hidden) closeEdit(); else { $("#detailSheet").hidden = true; $("#settingsSheet").hidden = true; } } });
+document.addEventListener("keydown", e => { if (e.key === "Escape") { if (!$("#editSheet").hidden) { closeEdit(); queue = []; queueTotal = 0; } else { $("#detailSheet").hidden = true; $("#settingsSheet").hidden = true; } } });
 
 // ---------- CSV download ----------
 $("#exportBtn").addEventListener("click", () => {

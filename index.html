@@ -107,6 +107,7 @@
 <div class="sheet" id="editSheet" hidden>
   <div class="panel" role="dialog" aria-modal="true" aria-labelledby="editTitle">
     <div class="panel-head"><h3 id="editTitle">Check this receipt</h3><button class="ghost" type="button" id="editClose">Cancel</button></div>
+    <div class="queuebar" id="queueBar" hidden><span id="queueText"></span><button type="button" class="ghost" id="queueStop">Stop</button></div>
     <div class="attbox">
       <div class="attbox-head"><span class="lbl">Photos &amp; files</span><span class="small" id="attEmpty">None yet</span></div>
       <div class="atts" id="attList"></div>
@@ -141,6 +142,16 @@
       <div class="field"><span class="lbl" id="kindLbl">Type</span><div class="seg" id="fKind" role="group" aria-labelledby="kindLbl"><button type="button" data-v="personal" aria-pressed="true">Personal</button><button type="button" data-v="business" aria-pressed="false">Business</button></div></div>
       <div class="actions full"><button type="submit" class="primary" id="saveBtn">Save receipt</button></div>
     </form>
+  </div>
+</div>
+
+<!-- several photos picked: separate receipts or one long one? -->
+<div class="sheet" id="multiSheet" hidden>
+  <div class="panel" role="dialog" aria-modal="true" aria-labelledby="multiTitle">
+    <div class="panel-head"><h3 id="multiTitle">How should these be added?</h3><button class="ghost" type="button" id="multiCancel">Cancel</button></div>
+    <p id="multiCount" style="margin:0"></p>
+    <button type="button" class="choice" id="multiSeparate"><strong>Separate receipts</strong><span>Each photo or file is its own receipt. You'll check them one by one.</span></button>
+    <button type="button" class="choice" id="multiOne"><strong>One long receipt</strong><span>They're parts of the same receipt, top to bottom.</span></button>
   </div>
 </div>
 
