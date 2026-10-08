@@ -11,7 +11,8 @@
     [/costco/i,"Costco","Groceries"],[/superstore/i,"Real Canadian Superstore","Groceries"],[/safeway/i,"Safeway","Groceries"],
     [/sobeys/i,"Sobeys","Groceries"],[/save[\s-]?on[\s-]?foods/i,"Save-On-Foods","Groceries"],[/no\s?frills/i,"No Frills","Groceries"],
     [/fresh\s?co/i,"FreshCo","Groceries"],[/calgary\s+co-?op|\bco-?op\b/i,"Calgary Co-op","Groceries"],[/\bt\s?&\s?t\b/i,"T&T Supermarket","Groceries"],
-    [/loblaw/i,"Loblaws","Groceries"],[/\biga\b/i,"IGA","Groceries"],[/whole\s?foods/i,"Whole Foods","Groceries"],[/african|afro|nigerian|global\s+foods/i,null,"Groceries"],
+    [/loblaw/i,"Loblaws","Groceries"],[/\biga\b/i,"IGA","Groceries"],[/whole\s?foods/i,"Whole Foods","Groceries"],[/african\s+(food|market|store|grocer)|afro\s*(food|market|grocer)|nigerian\s+(food|market|store)|global\s+foods/i,null,"Groceries"],
+    [/boutique|fashion|clothing|apparel|\bdress(es)?\b|\bskirt\b|\bblouse\b|\bjeans\b/i,null,"Shopping"],
     [/shoppers\s*drug|shoppers/i,"Shoppers Drug Mart","Health & pharmacy"],[/rexall/i,"Rexall","Health & pharmacy"],[/pharmacy|pharmacie|drug\s?mart/i,null,"Health & pharmacy"],
     [/london\s+drugs/i,"London Drugs","Shopping"],[/wal[\s*-]?mart/i,"Walmart","Shopping"],[/dollarama/i,"Dollarama","Shopping"],
     [/winners/i,"Winners","Shopping"],[/home\s?sense/i,"HomeSense","Home & utilities"],[/marshalls/i,"Marshalls","Shopping"],
@@ -67,17 +68,33 @@
   }
 
   // Money-looking numbers on a line: 12.34, 1,234.56, 12,34 (European), $ 12.34, 12.34-
+  // Whole amounts ("£85") are only read on documents that don't print cents (designed invoices).
+  // Till receipts always print cents, so a whole "$1000" there is a contest banner, not a price.
+  let allowWhole = true;
   function amountsIn(line) {
-    const out = [];
-    const re = /(-?)\$?\s?(\d{1,3}(?:,\d{3})+|\d+)\s?([.,])\s?(\d{2})(?!\d)(-?)/g;
+    const found = [];
+    const re = /(-?)[$£€₦]?\s?(\d{1,3}(?:,\d{3})+|\d+)\s?([.,])\s?(\d{2})(?!\d)(-?)/g;
     let m;
     while ((m = re.exec(line))) {
       const whole = m[2].replace(/[,\s]/g, "");
       const n = parseFloat(whole + "." + m[4]);
       if (!isFinite(n) || n > 100000) continue;
-      out.push((m[1] || m[5]) ? -n : n);
+      found.push({ at: m.index, end: m.index + m[0].length, v: (m[1] || m[5]) ? -n : n });
     }
-    return out;
+    // Whole amounts are only counted when a currency sign marks them as money ("£85", "$1,200"), never bare numbers.
+    const re2 = allowWhole ? /(-?)([$£€₦])\s?(\d{1,3}(?:,\d{3})+|\d+)(?![\d.,]\d)/g : null;
+    while (re2 && (m = re2.exec(line))) {
+      if (found.some(f => m.index < f.end && m.index + m[0].length > f.at)) continue;
+      const n = parseFloat(m[3].replace(/,/g, ""));
+      if (!isFinite(n) || n > 100000) continue;
+      found.push({ at: m.index, v: m[1] ? -n : n });
+    }
+    return found.sort((a, b) => a.at - b.at).map(f => f.v);
+  }
+  function findCurrency(text) {
+    const n = (re) => (text.match(re) || []).length;
+    const c = [["GBP", n(/£|\bGBP\b/g)], ["EUR", n(/€|\bEUR\b/g)], ["NGN", n(/₦|\bNGN\b/g)], ["USD", n(/\bUSD\b|US\$/g)], ["MXN", n(/\bMXN\b/g)]].sort((a, b) => b[1] - a[1]);
+    return c[0][1] > 0 ? c[0][0] : null;
   }
 
   function pad(n) { return String(n).padStart(2, "0"); }
@@ -156,7 +173,7 @@
     return tax;
   }
 
-  const MERCHANT_SKIP = /receipt|welcome|thank|store\s*#|store\s*no|tel\b|phone|fax|www\.|http|\.com|@|^\s*(\d|#)|cashier|register|trans(action)?|invoice|order|date|time|gst|hst|reg\b|street|\bst\.?\b|\bave\b|avenue|road|\brd\b|blvd|drive|\bdr\b|suite|unit|\bab\b|alberta|calgary|canada|t\d[a-z]\s?\d[a-z]\d/i;
+  const MERCHANT_SKIP = /receipt|welcome|thank|store\s*#|store\s*no|tel\b|phone|fax|www\.|http|\.com|@|^\s*(\d|#)|cashier|register|trans(action)?|invoice|order|date|time|bill(ed)?\s+to|sold\s+to|ship(ped)?\s+to|customer|client|\b(miss|mr|mrs|ms|dr)\.?\s|patronage|item\s|quantity|unit\s+price|gst|hst|reg\b|street|\bst\.?\b|\bave\b|avenue|road|\brd\b|blvd|drive|\bdr\b|suite|unit|\bab\b|alberta|calgary|canada|t\d[a-z]\s?\d[a-z]\d/i;
   function titleCase(s) {
     return s.toLowerCase().replace(/(^|[\s&-])([a-z])/g, (m, p, c) => p + c.toUpperCase()).replace(/\bLtd\b/, "Ltd.").trim();
   }
@@ -180,8 +197,10 @@
 
   function cleanItemName(raw) {
     // The name is whatever comes before the first price on the line.
-    const m = /-?\$?\s?\d{1,3}(?:[,\s]\d{3})*\s?[.,]\s?\d{2}(?!\d)/.exec(raw);
-    let n = (m ? raw.slice(0, m.index) : raw)
+    const m = /-?[$£€₦]?\s?\d{1,3}(?:[,\s]\d{3})*\s?[.,]\s?\d{2}(?!\d)|-?[$£€₦]\s?\d+/.exec(raw);
+    let n = (m ? raw.slice(0, m.index) : raw);
+    if (m && amountsIn(raw).length >= 2) n = n.replace(/\s+(?:x\s*)?\d{1,2}\s*$/i, "");   // "... Pants 1 £85 £85": the 1 is the quantity
+    n = n
       .replace(/\b\d{6,}\b/g, " ")                                                   // SKU / barcode numbers
       .replace(/[^\w&%'+./\- ]/g, " ")
       .replace(/\s+/g, " ").trim();
@@ -200,7 +219,10 @@
 
   /** Pull "name ... price" lines that sit above the subtotal/total. Returns [{name, price}]. */
   function findItems(lines) {
-    let end = lines.findIndex(l => STOP_RE.test(l));
+    // The first subtotal/total line that carries an amount (a column heading like "Unit Price  Total" doesn't count).
+    // Stop at the first subtotal/total line, except a table's column headings ("Item  Qty  Unit Price  Total").
+    const isHeading = l => !amountsIn(l).length && (l.match(/\b(item|items|description|qty|quantity|unit|price|amount|rate|hours?)\b/gi) || []).length >= 2;
+    let end = lines.findIndex(l => STOP_RE.test(l) && !isHeading(l));
     if (end < 0) end = lines.length;
     // Items start after the header block: first line that has a price and isn't the date/phone line.
     const items = [];
@@ -251,6 +273,7 @@
     const raw = String(text || "");
     const lines = raw.split(/\r?\n/).map(l => fixDigits(l.trim())).filter(Boolean);
     const joined = lines.join("\n");
+    allowWhole = (joined.match(/\d[.,]\d{2}(?!\d)/g) || []).length < 3;
 
     // The store name is printed near the top, so the earliest match wins.
     let merchant = "", category = null, kind = null, named = null, generic = null;
@@ -272,6 +295,19 @@
         if (core.length >= 3) merchant = core.charAt(0).toUpperCase() + core.slice(1);
       }
     }
+    if (!merchant && /invoice|bill(ed)?\s+to/i.test(joined)) {
+      // Invoices usually put the business name in the footer or header, on a short line of its own.
+      const ok = l => /^[A-Za-z][A-Za-z&' .-]{2,28}$/.test(l.trim()) && l.trim().split(/\s+/).length <= 3 && !MERCHANT_SKIP.test(l) && !/^(total|subtotal|tax|invoice|thank|amount|balance|due|paid|item|quantity|price)\b/i.test(l.trim());
+      const pool = lines.slice(-8).reverse().concat(lines.slice(0, 4)).filter(ok).map(l => l.trim());
+      const lower = joined.toLowerCase();
+      const repeated = pool.find(c => lower.split(c.toLowerCase()).length > 2);   // named in the logo and the footer
+      // A name stuck on the end of a footer line ("Thank you for your Kurvies") beats a garbled logo at the top.
+      const COMMON = /^(thank|thanks|you|your|for|total|invoice|please|visit|again|store|receipt|customer|payment|balance|amount|patronage|business|shopping|service|order|items?|price|date|paid|due|card|cash|change|welcome|every|curve|fashion)$/i;
+      const tail = lines.slice(-6).reverse().map(l => (l.trim().match(/\b([A-Z][a-z]{3,}(?:\s[A-Z][a-z]{2,})?)[.!]?$/) || [])[1]).find(w => w && !w.split(" ").some(x => COMMON.test(x)));
+      const footer = pool.find(c => lines.slice(-8).some(l => l.trim() === c));
+      const cand = repeated || footer || tail || pool[0];
+      if (cand) merchant = titleCase(cand);
+    }
     if (!merchant) merchant = titleCase(findMerchantLine(lines));
 
     const learned = opts.learned || {};
@@ -286,10 +322,10 @@
 
     const weak = how !== "total" || !merchant || !date || (opts.confidence != null && opts.confidence < 55);
     const items = findItems(lines);
-    return { merchant, date, total, tax, category, kind, item: ITEM_FOR[category] || "", items, confident: !weak, totalFrom: how };
+    return { merchant, date, total, tax, category, kind, item: ITEM_FOR[category] || "", items, currency: findCurrency(joined), confident: !weak, totalFrom: how };
   }
 
-  const api = { parseReceipt, findItems, amountsIn, findDate, CATEGORIES };
+  const api = { parseReceipt, findItems, amountsIn, findDate, findCurrency, CATEGORIES };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.ShoeboxParse = api;
 })(typeof window !== "undefined" ? window : globalThis);

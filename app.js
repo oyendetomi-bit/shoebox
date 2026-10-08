@@ -13,7 +13,7 @@ const SCOPE = "https://www.googleapis.com/auth/drive.file";
 const DAPI = "https://www.googleapis.com/drive/v3", UAPI = "https://www.googleapis.com/upload/drive/v3";
 const FOLDER = "application/vnd.google-apps.folder", SHEET = "application/vnd.google-apps.spreadsheet";
 const RECENT = 5;
-const APP_VERSION = "Version 11 · all-time and yearly totals";
+const APP_VERSION = "Version 12 · invoices and dark images";
 const { parseReceipt, CATEGORIES } = window.ShoeboxParse;
 const $ = s => document.querySelector(s);
 
@@ -654,12 +654,18 @@ async function prepare(file) {
   let bmp;
   try { bmp = await createImageBitmap(file, { imageOrientation: "from-image" }); } catch { bmp = await createImageBitmap(file); }
   const draw = max => { const s = Math.min(1, max / Math.max(bmp.width, bmp.height)); const c = document.createElement("canvas"); c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s); c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height); return c; };
+  // Dark documents (white text on black, like many designed invoices) are flipped to dark text on light.
+  const probe = draw(200), pd = probe.getContext("2d").getImageData(0, 0, probe.width, probe.height).data;
+  let lum = 0; for (let i = 0; i < pd.length; i += 4) lum += 0.299 * pd[i] + 0.587 * pd[i + 1] + 0.114 * pd[i + 2];
+  const dark = lum / (pd.length / 4) < 100;
+  probe.width = probe.height = 0;
+  const invert = c => { if (!dark) return c; const x = c.getContext("2d"), im = x.getImageData(0, 0, c.width, c.height), q = im.data; for (let i = 0; i < q.length; i += 4) { q[i] = 255 - q[i]; q[i + 1] = 255 - q[i + 1]; q[i + 2] = 255 - q[i + 2]; } x.putImageData(im, 0, 0); return c; };
   const pc = draw(2000);
   const photo = await new Promise(r => pc.toBlob(b => r(b || file), "image/jpeg", 0.82));
   pc.width = pc.height = 0;
   // OCR copy: cropped to the receipt, larger, grayscale, contrast-stretched
   // Cut out the receipt first, then enlarge just that part (in one high-quality step) so its longer side is 2200px.
-  const small = draw(800), box = findReceipt(small);
+  const small = invert(draw(800)), box = findReceipt(small);
   small.width = small.height = 0;
   const bx = box.x0 * bmp.width, by = box.y0 * bmp.height, bw = (box.x1 - box.x0) * bmp.width, bh = (box.y1 - box.y0) * bmp.height;
   const k = Math.min(2200 / Math.max(bw, bh), 3);
@@ -670,7 +676,7 @@ async function prepare(file) {
   ctx.drawImage(bmp, bx, by, bw, bh, 0, 0, c.width, c.height);
   const img = ctx.getImageData(0, 0, c.width, c.height), d = img.data;
   let lo = 255, hi = 0; const g = new Uint8ClampedArray(d.length / 4);
-  for (let i = 0, j = 0; i < d.length; i += 4, j++) { const v = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; g[j] = v; if (v < lo) lo = v; if (v > hi) hi = v; }
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) { let v = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; if (dark) v = 255 - v; g[j] = v; if (v < lo) lo = v; if (v > hi) hi = v; }
   const span = Math.max(1, hi - lo);
   for (let i = 0, j = 0; i < d.length; i += 4, j++) { const v = Math.min(255, Math.max(0, (g[j] - lo) * 255 / span)); d[i] = d[i + 1] = d[i + 2] = v; }
   ctx.putImageData(img, 0, 0);
@@ -703,6 +709,12 @@ function findReceipt(c) {
       if (on) { if (start < 0 || x - last > gap) { if (start >= 0 && (!best || sum > best.sum)) best = { a: start, b: last, sum }; start = x; sum = 0; } last = x; sum += cs[x]; }
     }
     if (start >= 0 && (!best || sum > best.sum)) best = { a: start, b: last, sum };
+    // Invoices and tables have columns with wide gaps between them: include every run with real text,
+    // not only the biggest one (otherwise the item names get cut off and only the prices remain).
+    { const runs = []; let st = -1, lt = -1, sm = 0;
+      for (let x = 0; x <= w; x++) { const on = x < w && cs[x] > t; if (on) { if (st < 0 || x - lt > gap) { if (st >= 0) runs.push({ a: st, b: lt, sum: sm }); st = x; sm = 0; } lt = x; sm += cs[x]; } }
+      if (st >= 0) runs.push({ a: st, b: lt, sum: sm });
+      runs.filter(r => r.sum >= best.sum * 0.15).forEach(r => { best.a = Math.min(best.a, r.a); best.b = Math.max(best.b, r.b); }); }
     const rowInk = new Float32Array(h);
     for (let y = 0; y < h; y++) { let n = 0; for (let x = best.a; x <= best.b; x++) n += ink[y * w + x]; rowInk[y] = n / (best.b - best.a + 1); }
     const rs = smooth(rowInk, Math.max(3, Math.round(h / 60))), rmax = Math.max(...rs), tr = Math.max(rmax * 0.12, 0.005);
@@ -747,7 +759,11 @@ async function textFrom(blob, type, onPage) {
         const vp = page.getViewport({ scale: 2.2 }), c = document.createElement("canvas");
         c.width = vp.width; c.height = vp.height;
         await page.render({ canvasContext: c.getContext("2d"), viewport: vp }).promise;
-        text = (await (await getWorker()).recognize(c)).data.text;
+        const pageImg = await new Promise(r => c.toBlob(r, "image/png"));
+        c.width = c.height = 0;
+        const prepared = await prepare(pageImg);
+        text = (await (await getWorker()).recognize(prepared.ocrCanvas)).data.text;
+        prepared.ocrCanvas.width = prepared.ocrCanvas.height = 0;
       }
       out.push(text);
     }
@@ -1041,7 +1057,7 @@ async function readAll(refetch) {
       return;
     }
     const keep = { item: $("#fItem").value, kind: form.kind };
-    fillForm({ ...r, currency: "CAD", item: keep.item || r.item, kind: r.kind });
+    fillForm({ ...r, currency: r.currency || "CAD", item: keep.item || r.item, kind: r.kind });
     form.lowConf = !r.confident;
     const unread = r.items.filter(i => i.name === "Unreadable item").length;
     readMsg(r.total == null ? (list.length > 1 || form.atts.length > 1 ? "Couldn't find the total yet. If the receipt continues, add the next photo; otherwise fill it in." : "Couldn't find the total. If the receipt is long, add another photo of the rest; otherwise fill it in.")
