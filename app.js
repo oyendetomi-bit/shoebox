@@ -13,7 +13,7 @@ const SCOPE = "https://www.googleapis.com/auth/drive.file";
 const DAPI = "https://www.googleapis.com/drive/v3", UAPI = "https://www.googleapis.com/upload/drive/v3";
 const FOLDER = "application/vnd.google-apps.folder", SHEET = "application/vnd.google-apps.spreadsheet";
 const RECENT = 5;
-const APP_VERSION = "Version 10 · ledger sheets, better PDFs";
+const APP_VERSION = "Version 11 · all-time and yearly totals";
 const { parseReceipt, CATEGORIES } = window.ShoeboxParse;
 const $ = s => document.querySelector(s);
 
@@ -363,8 +363,22 @@ function ledgerTab(XLSX, rs, numberOf, { withSheet }) {
   }
   if (years.length > 1) { out.push([]); out.push([label(`ALL YEARS TOTAL SPENT${mixed ? " (all currencies)" : ""}`), ...blank(4), F(`SUM(${Fr})+SUM(${G})`), S(""), S(""), S(""), { t: "s", f: `COUNTUNIQUE(${J})&" receipts"`, v: "" }]); }
   if (!rs.length) out.push([S("No receipts on this sheet yet. In Shoebox, choose this sheet under \"Ledger sheet\" when you save a receipt.")]);
+  // At-a-glance totals, top right of the tab (columns O–P), so they show the moment the sheet opens.
+  const yNow = +todayISO().slice(0, 4);
+  const glance = [
+    [label("AT A GLANCE"), S("")],
+    [S("Total spent (all time)"), F(`SUM(${Fr})+SUM(${G})`)],
+    [S("Receipts (all time)"), C(`COUNTUNIQUE(${J})`)],
+    [S(`Spent in ${yNow}`), F(`SUMIFS(${Fr},${L},${yNow})+SUMIFS(${G},${L},${yNow})`)],
+    [S(`Receipts in ${yNow}`), C(`COUNTUNIQUEIFS(${J},${L},${yNow})`)],
+  ];
+  glance.forEach((pair, i) => {
+    const row = out[i] || (out[i] = []);
+    while (row.length < 14) row.push(S(""));
+    row[14] = pair[0]; row[15] = pair[1];
+  });
   const ws = XLSX.utils.aoa_to_sheet(out);
-  ws["!cols"] = [11, 34, 22, 18, 10, 11, 9, 9, 13, 10, 14, 6, 18].map(w => ({ wch: w }));
+  ws["!cols"] = [11, 34, 22, 18, 10, 11, 9, 9, 13, 10, 14, 6, 18, 3, 24, 14].map(w => ({ wch: w }));
   return ws;
 }
 async function ledgerWorkbook() {
@@ -601,6 +615,10 @@ function render() {
   $("#bizTotal").textContent = money(biz.reduce((a, r) => a + (r.total || 0), 0));
   $("#bizCount").textContent = `${biz.length} business receipt${biz.length === 1 ? "" : "s"} in ${year}`;
   const thisY = all.filter(r => (r.date || "").startsWith(year)), cadY = thisY.filter(r => r.currency === "CAD");
+  const cadAll = all.filter(r => r.currency === "CAD"), otherAll = all.length - cadAll.length;
+  $("#aTotal").textContent = money(cadAll.reduce((a, r) => a + (r.total || 0), 0));
+  const yrs = [...new Set(all.map(r => (r.date || "").slice(0, 4)).filter(Boolean))].sort();
+  $("#aCount").textContent = all.length ? `${all.length} receipt${all.length > 1 ? "s" : ""}${yrs.length > 1 ? ` · ${yrs[0]}–${yrs[yrs.length - 1]}` : ""}${otherAll ? ` · ${otherAll} in other currencies not included` : ""}` : "No receipts yet";
   $("#yLabel").textContent = `Spent in ${year}`;
   $("#yTotal").textContent = money(cadY.reduce((a, r) => a + (r.total || 0), 0));
   const otherY = thisY.length - cadY.length;

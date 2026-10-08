@@ -193,3 +193,8 @@ details.guide[open] summary{margin-bottom:10px}
 .choice:hover{border-color:var(--accent);background:var(--tissue)}
 .queuebar{display:flex;justify-content:space-between;align-items:center;gap:8px;background:var(--tissue);border:1px solid var(--line);border-radius:12px;padding:6px 6px 6px 12px;font-size:.86rem;font-weight:600}
 .pill.sheetpill{background:var(--ink);color:var(--bg)}
+
+.summary .tile.hero{background:var(--pink);border-color:transparent;color:var(--box-ink)}
+.summary .tile.hero h2,.summary .tile.hero small{color:color-mix(in srgb,var(--box-ink) 72%,transparent)}
+.summary .tile.hero .big{font-size:1.9rem}
+@media (max-width:360px){.summary .tile.hero .big{font-size:1.5rem}}
